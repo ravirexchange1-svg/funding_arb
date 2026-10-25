@@ -95,16 +95,15 @@
       <label>History window <select id="sc-days"><option>14</option><option selected>30</option><option>60</option><option>90</option></select></label>
       <label>Per leg, USD <input id="sc-n" type="number" value="10000" min="100" step="100"></label>
       <label>Fee per trade, bps <input id="sc-fee" type="number" value="5" min="0" step="0.5"></label>
-      <label>Min liquidity per leg <select id="sc-liq"><option value="250000">$250K</option><option value="1000000" selected>$1M</option><option value="5000000">$5M</option></select></label>
       <label><span>Only consistent</span><input id="sc-good" type="checkbox" checked></label>
       <label><span>Include Paradex (sampled)</span><input id="sc-paradex" type="checkbox" checked></label>
       <button id="sc-run" type="button">Scan all pairs</button>
     </div>
-    <div class="note" id="sc-msg">Scans every liquid asset listed on two or more venues with funding history and ranks short/long pairings by how consistently they paid. Takes a minute or two.</div>
+    <div class="note" id="sc-msg">Scans every asset listed on two or more venues with funding history and ranks short/long pairings by how consistently they paid. Takes a minute or two.</div>
     <div class="tablewrap" style="margin-top:10px"><table class="t-scan"><thead><tr id="sc-head"></tr></thead><tbody id="sc-body"></tbody></table></div>
     <p class="note">
       Score is the lower of the net return over the window and the gross return over the last 7 days, so a pair must have paid over both. “Days up” is the share of days with positive funding.
-      Liquidity is the smaller of open interest plus 24h volume across the two legs. Pairs whose prices differ by more than 5% are dropped as likely different tokens.
+      There is no liquidity filter, so thin markets are included; check order-book depth before trading. Pairs whose prices differ by more than 5% are dropped as likely different tokens.
       Paradex is sampled about every 12 hours, so its numbers are approximate. Extended and Aster need the local server. Variational and QFEX publish no history; on localhost they are recorded while the page is open and only appear once enough days have been recorded. Spread now is today’s estimate, shown for comparison only.
       The same caveats as Backtest apply: price gap, margin, slippage and fees can outweigh funding.
     </p>
@@ -782,13 +781,13 @@ async function runScan() {
   sc.busy = true; $("sc-run").disabled = true;
   const msg = $("sc-msg"); msg.className = "note";
   const days = num($("sc-days").value), N = num($("sc-n").value) || 10000, fee = num($("sc-fee").value) || 0;
-  const minLiq = num($("sc-liq").value), onlyGood = $("sc-good").checked, withParadex = $("sc-paradex").checked;
+  const onlyGood = $("sc-good").checked, withParadex = $("sc-paradex").checked;
   const usable = v => HISTORY[v] && (withParadex || v !== "Paradex") && (HAS_PROXY || (v !== "Aster" && v !== "Extended")) && (LOCAL || (v !== "Variational" && v !== "QFEX"));
   try {
     // 1. candidates: per asset, the most liquid market on each usable venue
     const byAsset = new Map();
     for (const r of state.rows) {
-      if (!usable(r.venue) || r.id == null || size(r) < minLiq) continue;
+      if (!usable(r.venue) || r.id == null) continue;
       const k = canon(r.name);
       if (!byAsset.has(k)) byAsset.set(k, new Map());
       const m = byAsset.get(k), prev = m.get(r.venue);
@@ -820,7 +819,7 @@ async function runScan() {
         if (S === L) continue;
         if (Math.abs(S.mark - L.mark) / Math.min(S.mark, L.mark) > 0.05) continue;   // probably different tokens
         const e = evalPair(hist.get(S), hist.get(L), N, fee, days);
-        out.push({ asset, S, L, ...e, liq: Math.min(size(S), size(L)), now: S.apr - L.apr });
+        out.push({ asset, S, L, ...e, now: S.apr - L.apr });
       }
     }
     sc.rows = out.filter(r => !onlyGood || (r.aprNet > 0 && r.apr7 > 0 && r.posPct >= 0.55));
@@ -841,7 +840,7 @@ function renderScan() {
     ["score", "Score APR", r => fmt.pct(r.score, 1), r => r.score], ["aprNet", `${sc.days}d net APR`, r => fmt.pct(r.aprNet, 1), r => r.aprNet],
     ["apr7", "7d APR", r => fmt.pct(r.apr7, 1), r => r.apr7], ["posPct", "Days up", r => Math.round(r.posPct * 100) + "%", r => r.posPct],
     ["net", `Net $ on ${usdSigned(sc.N || 10000)}/leg`, r => usd2(r.net), r => r.net], ["dd", "Max drawdown", r => usd2(-r.dd), r => -r.dd],
-    ["now", "Spread now", r => fmt.pct(r.now, 0), r => r.now], ["liq", "Liquidity", r => fmt.usd(r.liq), r => r.liq],
+    ["now", "Spread now", r => fmt.pct(r.now, 0), r => r.now],
   ];
   const key = cols.find(c => c[0] === sc.sort) || cols[3], get = key[3] || key[2];
   const rows = [...sc.rows].sort((a, b) => sc.dir * (typeof get(a) === "string" ? get(a).localeCompare(get(b)) : get(a) - get(b))).slice(0, 150);
