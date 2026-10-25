@@ -121,6 +121,7 @@
       <label>Fee per trade, bps <input id="bt-fee" type="number" value="5" min="0" step="0.5"></label>
       <button id="bt-run" type="button">Run backtest</button>
     </div>
+    <div class="note" id="bt-dq"></div>
     <div class="note" id="bt-msg">Pick an asset and two venues, or click a row in Compare venues.</div>
     <section class="stats" id="bt-stats"></section>
     <div class="chartwrap" id="bt-chartwrap" hidden>
@@ -563,6 +564,21 @@ async function loadHistory(r, days) {
   return v;
 }
 
+// Data check for one leg's history. A backtest is only as good as its data, so flag a leg that is short, patchy or flat.
+function dataCheck(ev, days, t1 = Date.now()) {
+  const t0 = t1 - days * DAY, issues = [];
+  if (ev.length < 3) return { ok: false, n: ev.length, issues: ["no usable history"], covDays: 0, maxGapH: NaN, complete: 0 };
+  const gaps = ev.slice(1).map((e, i) => e.t - ev[i].t).sort((a, b) => a - b);
+  const med = gaps[Math.floor(gaps.length / 2)] || HOUR, maxGap = gaps[gaps.length - 1];
+  const covDays = (t1 - ev[0].t) / DAY, complete = ev.length / ((t1 - t0) / med);
+  const zero = ev.filter(e => Math.abs(e.r) < 1e-12).length / ev.length;
+  if (covDays < 0.8 * days) issues.push(`history covers only ${covDays.toFixed(0)} of ${days} days`);
+  if (complete < 0.85) issues.push(`only ${(complete * 100).toFixed(0)}% of expected points present`);
+  if (maxGap > 4 * med && maxGap > 6 * HOUR) issues.push(`gap of ${(maxGap / HOUR).toFixed(0)}h`);
+  if (zero > 0.98) issues.push("every rate is exactly zero (likely missing data)");
+  return { ok: !issues.length, n: ev.length, issues, covDays, maxGapH: maxGap / HOUR, complete: Math.min(complete, 1), medH: med / HOUR };
+}
+
 // Cheapest way to a pair: for one asset, the row on each venue with the most open interest.
 function marketsFor(asset) {
   const by = new Map();
@@ -670,18 +686,20 @@ async function runBacktest() {
   if (sv === lv) { msg.textContent = "Pick two different venues."; return; }
   const N = num($("bt-n").value), days = num($("bt-days").value), fee = num($("bt-fee").value) || 0;
   if (!(N > 0)) { msg.textContent = "Enter a notional above 0."; return; }
-  bt.busy = true; $("bt-run").disabled = true; msg.className = "note"; msg.textContent = "Loading funding history…";
+  bt.busy = true; $("bt-run").disabled = true; msg.className = "note"; msg.textContent = "Loading funding history…"; $("bt-dq").textContent = "";
   try {
     const sr = by.get(sv), lr = by.get(lv);
     const [se, le] = await Promise.all([loadHistory(sr, days), loadHistory(lr, days)]);
     if (!se.length || !le.length) throw new Error(`No funding history returned for ${!se.length ? sv : lv}`);
     const t1 = Date.now(), t0 = t1 - days * DAY;
+    const dqS = dataCheck(se, days), dqL = dataCheck(le, days);
+    const dqLine = (v, d) => `${v}: ${d.n} funding points, ${d.covDays.toFixed(0)} of ${days} days, ${(d.complete * 100).toFixed(0)}% complete, longest gap ${d.maxGapH.toFixed(0)}h ` + (d.ok ? "✓" : "⚠ " + d.issues.join("; "));
+    $("bt-dq").className = "note" + (dqS.ok && dqL.ok ? "" : " warn");
+    $("bt-dq").textContent = "Data check — " + dqLine(sv + " (short)", dqS) + "  |  " + dqLine(lv + " (long)", dqL) + (dqS.ok && dqL.ok ? "" : "  → treat this result as unreliable.");
     const res = backtest(se, le, N, fee, t0, t1);
     const gap = Math.abs(sr.mark - lr.mark) / Math.min(sr.mark, lr.mark);
-    const cover = d => Math.round((t1 - d[0].t) / DAY);
     const notes = [];
     if (gap > 0.05) notes.push(`Prices differ by ${(gap * 100).toFixed(0)}% (${sv} ${fmt.px(sr.mark)} vs ${lv} ${fmt.px(lr.mark)}): these may be different tokens that share a ticker.`);
-    for (const [v, d] of [[sv, se], [lv, le]]) if (cover(d) < days - 1) notes.push(`${v} history covers only ${cover(d)} days.`);
     msg.className = "note" + (gap > 0.05 ? " warn" : "");
     msg.textContent = `Short ${asset} on ${sv}, long on ${lv}: ${usdSigned(N)} per leg, ${days} days. ` + notes.join(" ");
     const cap = 2 * N, annNet = res.netTotal / cap * 365 / days;
@@ -755,16 +773,17 @@ async function runScan() {
     const markets = assets.flatMap(([, m]) => [...m.values()]);
     let done = 0;
     msg.textContent = `Loading ${days}-day history for ${markets.length} markets across ${assets.length} assets…`;
-    const hist = new Map(), t1 = Date.now(), t0 = t1 - days * DAY, H = days * 24;
+    const hist = new Map(), bad = { n: 0, why: new Map() }, t1 = Date.now(), t0 = t1 - days * DAY, H = days * 24;
     let i = 0;
     await Promise.all(Array.from({ length: 8 }, async () => {
       while (i < markets.length) {
         const r = markets[i++];
         try {
           const ev = await loadHistory(r, days);
-          // skip markets listed less than ~80% of the window ago: a short record flatters or sinks a pair
-          if (ev.length && ev[0].t <= t0 + 0.2 * days * DAY) hist.set(r, bucketize(ev, t0, H));
-        } catch { /* skip markets that fail */ }
+          const q = dataCheck(ev, days, t1);
+          if (q.ok) hist.set(r, bucketize(ev, t0, H));
+          else { bad.n++; const k = q.issues[0].replace(/\d+/g, "#"); bad.why.set(k, (bad.why.get(k) || 0) + 1); }
+        } catch { bad.n++; bad.why.set("history request failed", (bad.why.get("history request failed") || 0) + 1); }
         msg.textContent = `Loading history… ${++done} of ${markets.length}`;
       }
     }));
@@ -781,7 +800,8 @@ async function runScan() {
     }
     sc.rows = out.filter(r => !onlyGood || (r.aprNet > 0 && r.apr7 > 0 && r.posPct >= 0.55));
     sc.N = N; sc.days = days;
-    msg.textContent = `Scanned ${markets.length} markets, ${assets.length} assets, ${out.length} pairings. ${sc.rows.length} shown` +
+    const why = [...bad.why].map(([k, n]) => `${n} × ${k}`).join(", ");
+    msg.textContent = `Scanned ${markets.length - bad.n} of ${markets.length} markets with clean history (${bad.n} dropped${why ? ": " + why : ""}), ${out.length} pairings. ${sc.rows.length} shown` +
       (onlyGood ? " (net positive over the window and the last 7 days, profitable on at least 55% of days)." : ".") +
       ` Click a row to open it in Backtest.`;
     renderScan();
