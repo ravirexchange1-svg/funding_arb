@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyperliquid Funding Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #14181f; --muted: #6a7482; --line: #e3e7ee;
+    --pos: #0a8f5b; --neg: #d1344a; --accent: #2b6cff; --chip: #eef1f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --panel: #161b22; --text: #e6eaf0; --muted: #8a94a3; --line: #262d38;
+            --pos: #3ddc97; --neg: #ff6b81; --accent: #6b9bff; --chip: #212833; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  .status { color: var(--muted); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.live { background: var(--pos); } .dot.err { background: var(--neg); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+  .tabs button, select, input { font: inherit; color: var(--text); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+  .tabs button { cursor: pointer; } .tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  input { min-width: 160px; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 70vh; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; font-size: 12px; color: var(--muted); }
+  th.sorted { color: var(--text); }
+  tbody tr:hover { background: var(--chip); }
+  .chip { background: var(--chip); border-radius: 4px; padding: 1px 6px; font-size: 12px; color: var(--muted); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+  .bar { display: inline-block; height: 6px; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  @media (max-width: 640px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Hyperliquid funding rates</h1>
+    <div class="status"><span id="dot" class="dot"></span><span id="status">Loading…</span></div>
+  </header>
+
+  <section class="stats" id="stats"></section>
+
+  <div class="controls">
+    <div class="tabs" id="tabs">
+      <button data-g="all" aria-pressed="true">All</button>
+      <button data-g="crypto" aria-pressed="false">Crypto</button>
+      <button data-g="tradfi" aria-pressed="false">TradFi / HIP-3</button>
+    </div>
+    <select id="dex" aria-label="Dex"></select>
+    <input id="q" type="search" placeholder="Search market…" aria-label="Search market">
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
+  <p class="note">
+    Funding is the hourly rate paid on Hyperliquid (positive: longs pay shorts). APR = hourly × 24 × 365, simple.
+    “TradFi / HIP-3” covers every builder-deployed dex (stocks, indices, commodities, FX and some crypto). Data: api.hyperliquid.xyz, refreshed every 5 s.
+  </p>
+</main>
+
+<script>
+const API = "https://api.hyperliquid.xyz/info";
+const REFRESH_MS = 5000;
+
+const COLS = [
+  { key: "name",   label: "Market" },
+  { key: "dex",    label: "Dex" },
+  { key: "mark",   label: "Mark", fmt: v => fmtPx(v) },
+  { key: "hourly", label: "Funding 1h", fmt: v => pct(v, 4), cls: true },
+  { key: "apr",    label: "APR", fmt: v => pct(v, 1), cls: true, bar: true },
+  { key: "prem",   label: "Premium", fmt: v => pct(v, 3), cls: true, hide: true },
+  { key: "oi",     label: "Open interest", fmt: v => usd(v) },
+  { key: "vol",    label: "24h volume", fmt: v => usd(v), hide: true },
+  { key: "lev",    label: "Max lev", fmt: v => v + "x", hide: true },
+];
+
+const state = { rows: [], group: "all", dex: "", q: "", sort: "apr", dir: -1, dexes: [], lastOk: 0 };
+
+const $ = id => document.getElementById(id);
+const num = v => (v == null ? NaN : Number(v));
+const pct = (v, d) => (isFinite(v) ? (v * 100).toFixed(d) + "%" : "–");
+const usd = v => !isFinite(v) ? "–" : v >= 1e9 ? "$" + (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? "$" + (v / 1e3).toFixed(1) + "K" : "$" + v.toFixed(0);
+const fmtPx = v => !isFinite(v) ? "–" : v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v >= 1 ? v.toFixed(3) : v.toPrecision(4);
+
+async function post(body) {
+  const r = await fetch(API, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+async function loadDexes() {
+  const list = await post({ type: "perpDexs" });
+  // First entry is null: the core exchange (crypto perps, empty dex name).
+  state.dexes = list.map(d => d ? { id: d.name, label: d.fullName || d.name } : { id: "", label: "Hyperliquid (core)" });
+  const sel = $("dex");
+  sel.replaceChildren(new Option("All dexes", ""));
+  for (const d of state.dexes) sel.add(new Option(d.label, d.id || "__core"));
+}
+
+async function refresh() {
+  try {
+    const results = await Promise.allSettled(state.dexes.map(d => post({ type: "metaAndAssetCtxs", dex: d.id })));
+    const rows = [];
+    let ok = 0;
+    results.forEach((res, i) => {
+      if (res.status !== "fulfilled") return;
+      ok++;
+      const dex = state.dexes[i].id;
+      const [meta, ctxs] = res.value;
+      meta.universe.forEach((u, j) => {
+        const c = ctxs[j];
+        if (!c || u.isDelisted) return;
+        const mark = num(c.markPx), hourly = num(c.funding);
+        rows.push({
+          name: u.name.includes(":") ? u.name.split(":")[1] : u.name,
+          dex: dex || "core",
+          group: dex ? "tradfi" : "crypto",
+          mark, hourly, apr: hourly * 24 * 365,
+          prem: num(c.premium),
+          oi: num(c.openInterest) * mark,
+          vol: num(c.dayNtlVlm),
+          lev: u.maxLeverage,
+        });
+      });
+    });
+    if (!ok) throw new Error("no dex responded");
+    state.rows = rows;
+    state.lastOk = Date.now();
+    setStatus(ok === results.length ? "live" : "err", ok === results.length ? "Live" : `Partial (${ok}/${results.length} dexes)`);
+    render();
+  } catch (e) {
+    setStatus("err", "Error: " + e.message + " – retrying");
+  }
+}
+
+function setStatus(kind, text) {
+  $("dot").className = "dot " + (kind === "live" ? "live" : "err");
+  $("status").textContent = text + " · " + new Date().toLocaleTimeString();
+}
+
+function visible() {
+  const q = state.q.trim().toLowerCase();
+  return state.rows.filter(r =>
+    (state.group === "all" || r.group === state.group) &&
+    (!state.dex || r.dex === (state.dex === "__core" ? "core" : state.dex)) &&
+    (!q || r.name.toLowerCase().includes(q)));
+}
+
+function render() {
+  const rows = visible();
+  const k = state.sort, dir = state.dir;
+  rows.sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (typeof x === "string") return dir * x.localeCompare(y);
+    return dir * ((isFinite(x) ? x : -Infinity) - (isFinite(y) ? y : -Infinity));
+  });
+
+  const maxApr = Math.max(0.0001, ...rows.map(r => Math.abs(r.apr)).filter(isFinite));
+  const thead = $("head");
+  thead.replaceChildren();
+  for (const c of COLS) {
+    const th = document.createElement("th");
+    th.textContent = c.label + (state.sort === c.key ? (state.dir > 0 ? " ▲" : " ▼") : "");
+    if (state.sort === c.key) th.className = "sorted";
+    if (c.hide) th.classList.add("hide-sm");
+    th.onclick = () => { state.dir = state.sort === c.key ? -state.dir : (c.key === "name" || c.key === "dex" ? 1 : -1); state.sort = c.key; render(); };
+    thead.append(th);
+  }
+
+  const tbody = $("body");
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    for (const c of COLS) {
+      const td = document.createElement("td");
+      if (c.key === "dex") {
+        const s = document.createElement("span"); s.className = "chip"; s.textContent = r.dex; td.append(s);
+      } else if (c.fmt) {
+        td.textContent = c.fmt(r[c.key]);
+        if (c.cls && isFinite(r[c.key])) td.className = r[c.key] >= 0 ? "pos" : "neg";
+        if (c.bar && isFinite(r.apr)) {
+          const b = document.createElement("span");
+          b.className = "bar"; b.style.width = Math.max(2, Math.abs(r.apr) / maxApr * 60) + "px";
+          b.style.background = r.apr >= 0 ? "var(--pos)" : "var(--neg)"; td.append(b);
+        }
+      } else td.textContent = r[c.key];
+      if (c.hide) td.classList.add("hide-sm");
+      tr.append(td);
+    }
+    frag.append(tr);
+  }
+  tbody.replaceChildren(frag);
+
+  const fin = rows.filter(r => isFinite(r.apr));
+  const top = fin.reduce((a, b) => (b.apr > (a?.apr ?? -Infinity) ? b : a), null);
+  const low = fin.reduce((a, b) => (b.apr < (a?.apr ?? Infinity) ? b : a), null);
+  const avg = fin.length ? fin.reduce((s, r) => s + r.apr, 0) / fin.length : NaN;
+  const stats = [
+    ["Markets", rows.length],
+    ["Avg APR", pct(avg, 1)],
+    ["Highest APR", top ? `${top.name} ${pct(top.apr, 1)}` : "–"],
+    ["Lowest APR", low ? `${low.name} ${pct(low.apr, 1)}` : "–"],
+    ["Open interest", usd(rows.reduce((s, r) => s + (r.oi || 0), 0))],
+  ];
+  $("stats").replaceChildren(...stats.map(([l, v]) => {
+    const d = document.createElement("div"); d.className = "stat";
+    const b = document.createElement("b"); b.textContent = v;
+    const s = document.createElement("span"); s.textContent = l;
+    d.append(b, s); return d;
+  }));
+}
+
+$("tabs").onclick = e => {
+  const g = e.target.dataset.g; if (!g) return;
+  state.group = g;
+  for (const b of $("tabs").children) b.setAttribute("aria-pressed", String(b.dataset.g === g));
+  render();
+};
+$("dex").onchange = e => { state.dex = e.target.value; render(); };
+$("q").oninput = e => { state.q = e.target.value; render(); };
+
+(async function init() {
+  try { await loadDexes(); } catch (e) { setStatus("err", "Could not load dex list: " + e.message); return; }
+  await refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
