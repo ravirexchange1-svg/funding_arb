@@ -43,6 +43,10 @@
   th:first-child, td:first-child { text-align: left; }
   .t-markets th:nth-child(2), .t-markets td:nth-child(2) { text-align: left; }
   .t-compare td:last-child, .t-compare th:last-child { text-align: left; }
+  .t-scan th:nth-child(2), .t-scan td:nth-child(2), .t-scan th:nth-child(3), .t-scan td:nth-child(3) { text-align: left; }
+  .t-scan tbody tr { cursor: pointer; }
+  .btform label span { display: block; }
+  .btform input[type="checkbox"] { width: auto; margin: 6px 0; }
   th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; font-size: 12px; color: var(--muted); z-index: 1; }
   th.sorted { color: var(--text); }
   tbody tr:hover { background: var(--chip); }
@@ -80,10 +84,31 @@
       <button data-view="markets" aria-pressed="true">By market</button>
       <button data-view="compare" aria-pressed="false">Compare venues</button>
       <button data-view="backtest" aria-pressed="false">Backtest</button>
+      <button data-view="scanner" aria-pressed="false">Scanner</button>
     </div>
     <select id="venue" aria-label="Venue"></select>
     <input id="q" type="search" placeholder="Search market…" aria-label="Search market">
   </div>
+
+  <section id="sc" hidden>
+    <div class="btform">
+      <label>History window <select id="sc-days"><option>14</option><option selected>30</option><option>60</option><option>90</option></select></label>
+      <label>Per leg, USD <input id="sc-n" type="number" value="10000" min="100" step="100"></label>
+      <label>Fee per trade, bps <input id="sc-fee" type="number" value="5" min="0" step="0.5"></label>
+      <label>Min liquidity per leg <select id="sc-liq"><option value="250000">$250K</option><option value="1000000" selected>$1M</option><option value="5000000">$5M</option></select></label>
+      <label><span>Only consistent</span><input id="sc-good" type="checkbox" checked></label>
+      <label><span>Include Paradex (slow)</span><input id="sc-paradex" type="checkbox"></label>
+      <button id="sc-run" type="button">Scan all pairs</button>
+    </div>
+    <div class="note" id="sc-msg">Scans every liquid asset listed on two or more venues with funding history and ranks short/long pairings by how consistently they paid. Takes a minute or two.</div>
+    <div class="tablewrap" style="margin-top:10px"><table class="t-scan"><thead><tr id="sc-head"></tr></thead><tbody id="sc-body"></tbody></table></div>
+    <p class="note">
+      Score is the lower of the net return over the window and the gross return over the last 7 days, so a pair must have paid over both. “Days up” is the share of days with positive funding.
+      Liquidity is the smaller of open interest plus 24h volume across the two legs. Pairs whose prices differ by more than 5% are dropped as likely different tokens.
+      Venues without history (Variational, Extended, QFEX) and, on the hosted page, Aster are not scanned. Spread now is today’s estimate, shown for comparison only.
+      The same caveats as Backtest apply: price gap, margin, slippage and fees can outweigh funding.
+    </p>
+  </section>
 
   <section id="bt" hidden>
     <div class="btform">
@@ -408,10 +433,12 @@ function renderCompare(q) {
 
 function render() {
   renderVenues();
-  const isBt = state.view === "backtest";
-  for (const id of ["tablewrap", "stats", "venue", "q"]) $(id).hidden = isBt;
-  $("bt").hidden = !isBt;
-  if (isBt) { refreshBtOptions(); return; }
+  const tableView = state.view === "markets" || state.view === "compare";
+  for (const id of ["tablewrap", "stats", "venue", "q"]) $(id).hidden = !tableView;
+  $("bt").hidden = state.view !== "backtest";
+  $("sc").hidden = state.view !== "scanner";
+  if (state.view === "backtest") refreshBtOptions();
+  if (!tableView) return;
   const q = state.q.trim().toLowerCase();
   const rows = state.view === "markets" ? renderMarkets(q) : renderCompare(q);
   const stats = [];
@@ -682,6 +709,116 @@ async function runBacktest() {
 $("bt-run").onclick = runBacktest;
 $("bt-asset").oninput = () => fillVenueSelects(true);
 $("bt-asset").onchange = () => fillVenueSelects(true);
+
+/* ---------------- Scanner ---------------- */
+// Fetches history for every liquid market that is listed on 2+ venues, then tests every short/long pairing and
+// ranks them by the weaker of (net return over the window, gross return over the last 7 days).
+const sc = { busy: false, rows: [], sort: "score", dir: -1 };
+
+function bucketize(events, t0, H) {
+  const a = new Float64Array(H);
+  for (const e of events) { const h = Math.floor((e.t - t0) / HOUR); if (h >= 0 && h < H) a[h] += e.r; }
+  return a;
+}
+function evalPair(bs, bl, N, feeBps, days) {
+  const H = days * 24, fee = 4 * N * feeBps / 1e4;
+  let cum = 0, peak = 0, dd = 0, pos = 0, dayPnl = 0, last7 = 0;
+  for (let h = 0; h < H; h++) {
+    const d = N * (bs[h] - bl[h]);
+    cum += d; dayPnl += d; if (h >= H - 168) last7 += d;
+    peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum);
+    if ((h + 1) % 24 === 0) { if (dayPnl > 0) pos++; dayPnl = 0; }
+  }
+  const cap = 2 * N, net = cum - fee;
+  const aprNet = net / cap * 365 / days, apr7 = last7 / cap * 365 / 7;
+  return { gross: cum, net, aprNet, apr7, posPct: pos / days, dd, score: Math.min(aprNet, apr7) };
+}
+
+async function runScan() {
+  if (sc.busy) return;
+  sc.busy = true; $("sc-run").disabled = true;
+  const msg = $("sc-msg"); msg.className = "note";
+  const days = num($("sc-days").value), N = num($("sc-n").value) || 10000, fee = num($("sc-fee").value) || 0;
+  const minLiq = num($("sc-liq").value), onlyGood = $("sc-good").checked, withParadex = $("sc-paradex").checked;
+  const usable = v => HISTORY[v] && (withParadex || v !== "Paradex") && (HAS_PROXY || v !== "Aster");
+  try {
+    // 1. candidates: per asset, the most liquid market on each usable venue
+    const byAsset = new Map();
+    for (const r of state.rows) {
+      if (!usable(r.venue) || r.id == null || size(r) < minLiq) continue;
+      const k = canon(r.name);
+      if (!byAsset.has(k)) byAsset.set(k, new Map());
+      const m = byAsset.get(k), prev = m.get(r.venue);
+      if (!prev || size(r) > size(prev)) m.set(r.venue, r);
+    }
+    const assets = [...byAsset].filter(([, m]) => m.size >= 2);
+    const markets = assets.flatMap(([, m]) => [...m.values()]);
+    let done = 0;
+    msg.textContent = `Loading ${days}-day history for ${markets.length} markets across ${assets.length} assets…`;
+    const hist = new Map(), t1 = Date.now(), t0 = t1 - days * DAY, H = days * 24;
+    let i = 0;
+    await Promise.all(Array.from({ length: 8 }, async () => {
+      while (i < markets.length) {
+        const r = markets[i++];
+        try {
+          const ev = await loadHistory(r, days);
+          // skip markets listed less than ~80% of the window ago: a short record flatters or sinks a pair
+          if (ev.length && ev[0].t <= t0 + 0.2 * days * DAY) hist.set(r, bucketize(ev, t0, H));
+        } catch { /* skip markets that fail */ }
+        msg.textContent = `Loading history… ${++done} of ${markets.length}`;
+      }
+    }));
+    // 2. every ordered pair
+    const out = [];
+    for (const [asset, m] of assets) {
+      const list = [...m.values()].filter(r => hist.has(r));
+      for (const S of list) for (const L of list) {
+        if (S === L) continue;
+        if (Math.abs(S.mark - L.mark) / Math.min(S.mark, L.mark) > 0.05) continue;   // probably different tokens
+        const e = evalPair(hist.get(S), hist.get(L), N, fee, days);
+        out.push({ asset, S, L, ...e, liq: Math.min(size(S), size(L)), now: S.apr - L.apr });
+      }
+    }
+    sc.rows = out.filter(r => !onlyGood || (r.aprNet > 0 && r.apr7 > 0 && r.posPct >= 0.55));
+    sc.N = N; sc.days = days;
+    msg.textContent = `Scanned ${markets.length} markets, ${assets.length} assets, ${out.length} pairings. ${sc.rows.length} shown` +
+      (onlyGood ? " (net positive over the window and the last 7 days, profitable on at least 55% of days)." : ".") +
+      ` Click a row to open it in Backtest.`;
+    renderScan();
+  } catch (e) {
+    msg.className = "note warn"; msg.textContent = "Scan failed: " + e.message;
+  } finally { sc.busy = false; $("sc-run").disabled = false; }
+}
+
+function renderScan() {
+  const cols = [
+    ["asset", "Asset", r => r.asset], ["S", "Short on", r => r.S.venue], ["L", "Long on", r => r.L.venue],
+    ["score", "Score APR", r => fmt.pct(r.score, 1), r => r.score], ["aprNet", `${sc.days}d net APR`, r => fmt.pct(r.aprNet, 1), r => r.aprNet],
+    ["apr7", "7d APR", r => fmt.pct(r.apr7, 1), r => r.apr7], ["posPct", "Days up", r => Math.round(r.posPct * 100) + "%", r => r.posPct],
+    ["net", `Net $ on ${usdSigned(sc.N || 10000)}/leg`, r => usd2(r.net), r => r.net], ["dd", "Max drawdown", r => usd2(-r.dd), r => -r.dd],
+    ["now", "Spread now", r => fmt.pct(r.now, 0), r => r.now], ["liq", "Liquidity", r => fmt.usd(r.liq), r => r.liq],
+  ];
+  const key = cols.find(c => c[0] === sc.sort) || cols[3], get = key[3] || key[2];
+  const rows = [...sc.rows].sort((a, b) => sc.dir * (typeof get(a) === "string" ? get(a).localeCompare(get(b)) : get(a) - get(b))).slice(0, 150);
+  $("sc-head").replaceChildren(...cols.map(c => {
+    const t = document.createElement("th"); t.textContent = c[1] + (sc.sort === c[0] ? (sc.dir > 0 ? " ▲" : " ▼") : "");
+    if (sc.sort === c[0]) t.className = "sorted";
+    t.onclick = () => { sc.dir = sc.sort === c[0] ? -sc.dir : (c[3] ? -1 : 1); sc.sort = c[0]; renderScan(); };
+    return t;
+  }));
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const tr = document.createElement("tr"); tr.title = "Open in Backtest";
+    for (const c of cols) {
+      const v = c[3] ? c[3](r) : null, cell = td(c[2](r), v != null && ["score", "aprNet", "apr7", "net", "now"].includes(c[0]) ? signCls(v) : "");
+      tr.append(cell);
+    }
+    tr.onclick = () => openBacktest(r.asset, r.S.venue, r.L.venue);
+    frag.append(tr);
+  }
+  $("sc-body").replaceChildren(frag);
+}
+$("sc-run").onclick = runScan;
 
 $("venue").replaceChildren(new Option("All venues", ""), ...ADAPTERS.map(a => new Option(a.venue, a.venue)));
 $("venue").onchange = e => { state.venue = e.target.value; render(); };
