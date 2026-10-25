@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hyperliquid Funding Dashboard</title>
+<title>Perp Funding Dashboard</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #fff; --text: #14181f; --muted: #6a7482; --line: #e3e7ee;
@@ -16,15 +16,20 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
   header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
   h1 { font-size: 20px; margin: 0; }
   .status { color: var(--muted); font-size: 13px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
   .dot.live { background: var(--pos); } .dot.err { background: var(--neg); }
+  .venues { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+  .venues .v { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--text); font: inherit; font-size: 12px; }
+  .venues .v[aria-pressed="true"] { border-color: var(--accent); }
+  .venues .v .dot { margin-right: 5px; }
+  .venues .v i { color: var(--muted); font-style: normal; margin-left: 4px; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .stat span { color: var(--muted); font-size: 12px; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
   .tabs button, select, input { font: inherit; color: var(--text); background: var(--panel);
@@ -34,12 +39,14 @@
   .tablewrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 70vh; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
-  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
-  th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; font-size: 12px; color: var(--muted); }
+  th:first-child, td:first-child { text-align: left; }
+  .t-markets th:nth-child(2), .t-markets td:nth-child(2) { text-align: left; }
+  .t-compare td:last-child, .t-compare th:last-child { text-align: left; }
+  th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; font-size: 12px; color: var(--muted); z-index: 1; }
   th.sorted { color: var(--text); }
   tbody tr:hover { background: var(--chip); }
   .chip { background: var(--chip); border-radius: 4px; padding: 1px 6px; font-size: 12px; color: var(--muted); }
-  .pos { color: var(--pos); } .neg { color: var(--neg); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .na { color: var(--muted); }
   .bar { display: inline-block; height: 6px; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
   @media (max-width: 640px) { .hide-sm { display: none; } }
@@ -48,178 +55,279 @@
 <body>
 <main>
   <header>
-    <h1>Hyperliquid funding rates</h1>
+    <h1>Perp funding rates</h1>
     <div class="status"><span id="dot" class="dot"></span><span id="status">Loading…</span></div>
   </header>
 
+  <div class="venues" id="venues"></div>
   <section class="stats" id="stats"></section>
 
   <div class="controls">
     <div class="tabs" id="tabs">
-      <button data-g="all" aria-pressed="true">All</button>
-      <button data-g="crypto" aria-pressed="false">Crypto</button>
-      <button data-g="tradfi" aria-pressed="false">TradFi / HIP-3</button>
+      <button data-view="markets" aria-pressed="true">By market</button>
+      <button data-view="compare" aria-pressed="false">Compare venues</button>
     </div>
-    <select id="dex" aria-label="Dex"></select>
+    <select id="venue" aria-label="Venue"></select>
     <input id="q" type="search" placeholder="Search market…" aria-label="Search market">
   </div>
 
   <div class="tablewrap">
-    <table>
+    <table id="table">
       <thead><tr id="head"></tr></thead>
       <tbody id="body"></tbody>
     </table>
   </div>
   <p class="note">
-    Funding is the hourly rate paid on Hyperliquid (positive: longs pay shorts). APR = hourly × 24 × 365, simple.
-    “TradFi / HIP-3” covers every builder-deployed dex (stocks, indices, commodities, FX and some crypto). Data: api.hyperliquid.xyz, refreshed every 5 s.
+    Funding is shown as an hourly rate; APR = hourly × 24 × 365, simple (positive: longs pay shorts). Venues quote funding over different
+    intervals (1h, 4h, 8h), so each rate is divided by its interval. Aster shows the last settled rate, not a forecast.
+    Pacifica open interest is left out because its API does not state the unit. In Compare, the spread is the gap between the highest and lowest APR for the same
+    asset; “long low / short high” is the pairing that collects it, before fees, borrow and price risk. Assets are matched by ticker only, so a very large spread can be two different tokens that share a name; check before trading.
+    Extended, Ondo, QFEX, Phoenix, RISEx, TXFlow and Arcus are not included yet because they have no public browser-readable API I could verify.
   </p>
 </main>
 
 <script>
-const API = "https://api.hyperliquid.xyz/info";
-const REFRESH_MS = 5000;
+const REFRESH_MS = 10000;
+const HL = "https://api.hyperliquid.xyz/info";
 
-const COLS = [
-  { key: "name",   label: "Market" },
-  { key: "dex",    label: "Dex" },
-  { key: "mark",   label: "Mark", fmt: v => fmtPx(v) },
-  { key: "hourly", label: "Funding 1h", fmt: v => pct(v, 4), cls: true },
-  { key: "apr",    label: "APR", fmt: v => pct(v, 1), cls: true, bar: true },
-  { key: "prem",   label: "Premium", fmt: v => pct(v, 3), cls: true, hide: true },
-  { key: "oi",     label: "Open interest", fmt: v => usd(v) },
-  { key: "vol",    label: "24h volume", fmt: v => usd(v), hide: true },
-  { key: "lev",    label: "Max lev", fmt: v => v + "x", hide: true },
-];
+const HL_NAMES = { io: "Entropy", km: "Kinetic", mkts: "Kinetiq (mkts)", xyz: "trade.xyz", flx: "Felix", vntl: "Ventuals",
+                   hyna: "HyENA", abcd: "ABCDEx", cash: "dreamcash", para: "Paragon" };
 
-const state = { rows: [], group: "all", dex: "", q: "", sort: "apr", dir: -1, dexes: [], lastOk: 0 };
-
-const $ = id => document.getElementById(id);
-const num = v => (v == null ? NaN : Number(v));
-const pct = (v, d) => (isFinite(v) ? (v * 100).toFixed(d) + "%" : "–");
-const usd = v => !isFinite(v) ? "–" : v >= 1e9 ? "$" + (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? "$" + (v / 1e3).toFixed(1) + "K" : "$" + v.toFixed(0);
-const fmtPx = v => !isFinite(v) ? "–" : v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v >= 1 ? v.toFixed(3) : v.toPrecision(4);
-
-async function post(body) {
-  const r = await fetch(API, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+const num = v => (v == null || v === "" ? NaN : Number(v));
+const row = (venue, name, mark, hourly, oi, vol) => ({ venue, name, mark, hourly, apr: hourly * 8760, oi, vol });
+const hlPost = body => getJSON(HL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
-async function loadDexes() {
-  const list = await post({ type: "perpDexs" });
-  // First entry is null: the core exchange (crypto perps, empty dex name).
-  state.dexes = list.map(d => d ? { id: d.name, label: d.fullName || d.name } : { id: "", label: "Hyperliquid (core)" });
-  const sel = $("dex");
-  sel.replaceChildren(new Option("All dexes", ""));
-  for (const d of state.dexes) sel.add(new Option(d.label, d.id || "__core"));
-}
-
-async function refresh() {
-  try {
-    const results = await Promise.allSettled(state.dexes.map(d => post({ type: "metaAndAssetCtxs", dex: d.id })));
-    const rows = [];
-    let ok = 0;
-    results.forEach((res, i) => {
-      if (res.status !== "fulfilled") return;
-      ok++;
-      const dex = state.dexes[i].id;
-      const [meta, ctxs] = res.value;
-      meta.universe.forEach((u, j) => {
-        const c = ctxs[j];
-        if (!c || u.isDelisted) return;
-        const mark = num(c.markPx), hourly = num(c.funding);
-        rows.push({
-          name: u.name.includes(":") ? u.name.split(":")[1] : u.name,
-          dex: dex || "core",
-          group: dex ? "tradfi" : "crypto",
-          mark, hourly, apr: hourly * 24 * 365,
-          prem: num(c.premium),
-          oi: num(c.openInterest) * mark,
-          vol: num(c.dayNtlVlm),
-          lev: u.maxLeverage,
-        });
-      });
+// Each adapter returns an array of rows: { venue, name, mark, hourly, apr, oi (USD), vol (USD) }.
+function hlAdapter(dex) {
+  const venue = dex ? "HL " + (HL_NAMES[dex] || dex) : "Hyperliquid";
+  return { id: "hl:" + dex, venue, every: REFRESH_MS, async fetch() {
+    const [meta, ctxs] = await hlPost({ type: "metaAndAssetCtxs", dex });
+    const out = [];
+    meta.universe.forEach((u, i) => {
+      const c = ctxs[i]; if (!c || u.isDelisted) return;
+      const mark = num(c.markPx);
+      out.push(row(venue, u.name.includes(":") ? u.name.split(":")[1] : u.name, mark, num(c.funding), num(c.openInterest) * mark, num(c.dayNtlVlm)));
     });
-    if (!ok) throw new Error("no dex responded");
-    state.rows = rows;
-    state.lastOk = Date.now();
-    setStatus(ok === results.length ? "live" : "err", ok === results.length ? "Live" : `Partial (${ok}/${results.length} dexes)`);
-    render();
+    return out;
+  } };
+}
+
+function lighterAdapter(venue, host) {
+  return { id: venue, venue, every: REFRESH_MS, async fetch() {
+    const [fr, ob] = await Promise.all([getJSON(host + "/api/v1/funding-rates"), getJSON(host + "/api/v1/orderBookDetails")]);
+    const rates = new Map(fr.funding_rates.filter(x => x.exchange === "lighter").map(x => [x.market_id, x.rate]));
+    return ob.order_book_details.filter(m => m.market_type === "perp" && m.status === "active" && rates.has(m.market_id))
+      .map(m => row(venue, m.symbol, num(m.mark_price), num(rates.get(m.market_id)), num(m.open_interest_usd), num(m.daily_quote_token_volume)));
+  } };
+}
+
+const ADAPTERS = [
+  hlAdapter(""),
+  ...["io", "km", "mkts", "xyz", "flx", "vntl", "hyna", "abcd", "cash", "para"].map(hlAdapter),
+  { id: "aster", venue: "Aster", every: REFRESH_MS, async fetch() {
+      const b = "https://fapi.asterdex.com/fapi/v1/";
+      const [pi, fi, tk] = await Promise.all([getJSON(b + "premiumIndex"), getJSON(b + "fundingInfo"), getJSON(b + "ticker/24hr")]);
+      const hrs = new Map(fi.map(x => [x.symbol, x.fundingIntervalHours || 8]));
+      const vol = new Map(tk.map(x => [x.symbol, num(x.quoteVolume)]));
+      return pi.map(x => row("Aster", x.symbol.replace(/(USDT|USDC|USD1|USD)$/, ""), num(x.markPrice),
+        num(x.lastFundingRate) / (hrs.get(x.symbol) || 8), NaN, vol.get(x.symbol) ?? NaN));
+  } },
+  lighterAdapter("Lighter", "https://mainnet.zklighter.elliot.ai"),
+  lighterAdapter("RH Lighter", "https://api.rh.lighter.xyz"),
+  { id: "paradex", venue: "Paradex", every: REFRESH_MS, async fetch() {
+      const d = await getJSON("https://api.prod.paradex.trade/v1/markets/summary?market=ALL");
+      // Paradex quotes funding over an 8h period.
+      return d.results.filter(x => x.symbol.endsWith("-PERP")).map(x => {
+        const mark = num(x.mark_price);
+        return row("Paradex", x.symbol.replace("-USD-PERP", ""), mark, num(x.funding_rate) / 8, num(x.open_interest) * mark, num(x.volume_24h));
+      });
+  } },
+  { id: "pacifica", venue: "Pacifica", every: REFRESH_MS, async fetch() {
+      const d = await getJSON("https://api.pacifica.fi/api/v1/info/prices");
+      return d.data.map(x => row("Pacifica", x.symbol, num(x.mark), num(x.next_funding ?? x.funding), NaN, num(x.volume_24h)));
+  } },
+  { id: "variational", venue: "Variational", every: 20000, async fetch() {
+      const d = await getJSON("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats");
+      // funding_rate here is already annualised (e.g. 0.1095 = 10.95% APR).
+      return d.listings.map(x => {
+        const oi = x.open_interest || {};
+        return row("Variational", x.ticker, num(x.mark_price), num(x.funding_rate) / 8760,
+          num(oi.long_open_interest) + num(oi.short_open_interest), num(x.volume_24h));
+      });
+  } },
+];
+
+const fmt = {
+  pct: (v, d) => (isFinite(v) ? (v * 100).toFixed(d) + "%" : "–"),
+  usd: v => !isFinite(v) ? "–" : v >= 1e9 ? "$" + (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? "$" + (v / 1e3).toFixed(1) + "K" : "$" + v.toFixed(0),
+  px: v => !isFinite(v) ? "–" : v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v >= 1 ? v.toFixed(3) : v.toPrecision(4),
+};
+
+const MCOLS = [
+  { key: "name", label: "Market" },
+  { key: "venue", label: "Venue" },
+  { key: "mark", label: "Mark", f: fmt.px },
+  { key: "hourly", label: "Funding 1h", f: v => fmt.pct(v, 4), sign: true },
+  { key: "apr", label: "APR", f: v => fmt.pct(v, 1), sign: true, bar: true },
+  { key: "oi", label: "Open interest", f: fmt.usd },
+  { key: "vol", label: "24h volume", f: fmt.usd, hide: true },
+];
+
+const state = { rows: [], view: "markets", venue: "", q: "", sort: "apr", dir: -1,
+                status: new Map(ADAPTERS.map(a => [a.id, { ok: null, n: 0, err: "", at: 0 }])), cache: new Map() };
+const $ = id => document.getElementById(id);
+const tabs = [...document.querySelectorAll("#tabs button")];
+
+async function run(a) {
+  const st = state.status.get(a.id);
+  try {
+    const rows = await a.fetch();
+    state.cache.set(a.id, rows);
+    Object.assign(st, { ok: true, n: rows.length, err: "", at: Date.now() });
   } catch (e) {
-    setStatus("err", "Error: " + e.message + " – retrying");
+    Object.assign(st, { ok: false, err: e.message, at: Date.now() });   // keep last good rows
   }
 }
 
-function setStatus(kind, text) {
-  $("dot").className = "dot " + (kind === "live" ? "live" : "err");
-  $("status").textContent = text + " · " + new Date().toLocaleTimeString();
+async function tick() {
+  const due = ADAPTERS.filter(a => Date.now() - (state.status.get(a.id).at || 0) >= a.every - 500);
+  await Promise.all(due.map(run));
+  state.rows = [].concat(...ADAPTERS.map(a => state.cache.get(a.id) || []));
+  const bad = ADAPTERS.filter(a => state.status.get(a.id).ok === false).length;
+  $("dot").className = "dot " + (bad ? "err" : "live");
+  $("status").textContent = (bad ? `${ADAPTERS.length - bad}/${ADAPTERS.length} venues ok` : "Live") + " · " + new Date().toLocaleTimeString();
+  render();
 }
 
-function visible() {
-  const q = state.q.trim().toLowerCase();
-  return state.rows.filter(r =>
-    (state.group === "all" || r.group === state.group) &&
-    (!state.dex || r.dex === (state.dex === "__core" ? "core" : state.dex)) &&
-    (!q || r.name.toLowerCase().includes(q)));
+function renderVenues() {
+  const box = $("venues");
+  box.replaceChildren(...ADAPTERS.map(a => {
+    const st = state.status.get(a.id);
+    const b = document.createElement("button"); b.className = "v"; b.type = "button";
+    b.setAttribute("aria-pressed", String(state.venue === a.venue));
+    b.title = st.ok === false ? "Error: " + st.err : st.ok ? "OK" : "Loading";
+    const d = document.createElement("span"); d.className = "dot " + (st.ok ? "live" : st.ok === false ? "err" : "");
+    const t = document.createTextNode(a.venue);
+    const i = document.createElement("i"); i.textContent = st.n || "";
+    b.append(d, t, i);
+    b.onclick = () => { state.venue = state.venue === a.venue ? "" : a.venue; $("venue").value = state.venue; render(); };
+    return b;
+  }));
 }
 
-function render() {
-  const rows = visible();
-  const k = state.sort, dir = state.dir;
-  rows.sort((a, b) => {
-    const x = a[k], y = b[k];
-    if (typeof x === "string") return dir * x.localeCompare(y);
-    return dir * ((isFinite(x) ? x : -Infinity) - (isFinite(y) ? y : -Infinity));
-  });
+function canon(name) {
+  let s = name.replace(/^k(?=[A-Z])/, "").toUpperCase();
+  return s.replace(/^(1000000|1000|1M)(?=[A-Z])/, "");
+}
 
+function th(label, key, sorted, dir, hide, onclick) {
+  const el = document.createElement("th");
+  el.textContent = label + (sorted ? (dir > 0 ? " ▲" : " ▼") : "");
+  if (sorted) el.className = "sorted";
+  if (hide) el.classList.add("hide-sm");
+  el.onclick = onclick; return el;
+}
+function setSort(key, textual) { state.dir = state.sort === key ? -state.dir : (textual ? 1 : -1); state.sort = key; render(); }
+const cmp = (k, dir) => (a, b) => {
+  const x = a[k], y = b[k];
+  if (typeof x === "string") return dir * x.localeCompare(y);
+  return dir * ((isFinite(x) ? x : -Infinity) - (isFinite(y) ? y : -Infinity));
+};
+function td(text, cls) { const el = document.createElement("td"); el.textContent = text; if (cls) el.className = cls; return el; }
+const signCls = v => (isFinite(v) ? (v >= 0 ? "pos" : "neg") : "na");
+
+function renderMarkets(q) {
+  $("table").className = "t-markets";
+  const rows = state.rows.filter(r => (!state.venue || r.venue === state.venue) && (!q || r.name.toLowerCase().includes(q)));
+  rows.sort(cmp(state.sort, state.dir));
   const maxApr = Math.max(0.0001, ...rows.map(r => Math.abs(r.apr)).filter(isFinite));
-  const thead = $("head");
-  thead.replaceChildren();
-  for (const c of COLS) {
-    const th = document.createElement("th");
-    th.textContent = c.label + (state.sort === c.key ? (state.dir > 0 ? " ▲" : " ▼") : "");
-    if (state.sort === c.key) th.className = "sorted";
-    if (c.hide) th.classList.add("hide-sm");
-    th.onclick = () => { state.dir = state.sort === c.key ? -state.dir : (c.key === "name" || c.key === "dex" ? 1 : -1); state.sort = c.key; render(); };
-    thead.append(th);
-  }
-
-  const tbody = $("body");
+  $("head").replaceChildren(...MCOLS.map(c => th(c.label, c.key, state.sort === c.key, state.dir, c.hide, () => setSort(c.key, c.key === "name" || c.key === "venue"))));
   const frag = document.createDocumentFragment();
   for (const r of rows) {
     const tr = document.createElement("tr");
-    for (const c of COLS) {
-      const td = document.createElement("td");
-      if (c.key === "dex") {
-        const s = document.createElement("span"); s.className = "chip"; s.textContent = r.dex; td.append(s);
-      } else if (c.fmt) {
-        td.textContent = c.fmt(r[c.key]);
-        if (c.cls && isFinite(r[c.key])) td.className = r[c.key] >= 0 ? "pos" : "neg";
+    for (const c of MCOLS) {
+      let cell;
+      if (c.key === "venue") { cell = td(""); const s = document.createElement("span"); s.className = "chip"; s.textContent = r.venue; cell.append(s); }
+      else if (c.f) {
+        cell = td(c.f(r[c.key]), c.sign ? signCls(r[c.key]) : (isFinite(r[c.key]) ? "" : "na"));
         if (c.bar && isFinite(r.apr)) {
-          const b = document.createElement("span");
-          b.className = "bar"; b.style.width = Math.max(2, Math.abs(r.apr) / maxApr * 60) + "px";
-          b.style.background = r.apr >= 0 ? "var(--pos)" : "var(--neg)"; td.append(b);
+          const b = document.createElement("span"); b.className = "bar";
+          b.style.width = Math.max(2, Math.min(60, Math.abs(r.apr) / maxApr * 60)) + "px";
+          b.style.background = r.apr >= 0 ? "var(--pos)" : "var(--neg)"; cell.append(b);
         }
-      } else td.textContent = r[c.key];
-      if (c.hide) td.classList.add("hide-sm");
-      tr.append(td);
+      } else cell = td(r[c.key]);
+      if (c.hide) cell.classList.add("hide-sm");
+      tr.append(cell);
     }
     frag.append(tr);
   }
-  tbody.replaceChildren(frag);
+  $("body").replaceChildren(frag);
+  return rows;
+}
 
-  const fin = rows.filter(r => isFinite(r.apr));
-  const top = fin.reduce((a, b) => (b.apr > (a?.apr ?? -Infinity) ? b : a), null);
-  const low = fin.reduce((a, b) => (b.apr < (a?.apr ?? Infinity) ? b : a), null);
-  const avg = fin.length ? fin.reduce((s, r) => s + r.apr, 0) / fin.length : NaN;
-  const stats = [
-    ["Markets", rows.length],
-    ["Avg APR", pct(avg, 1)],
-    ["Highest APR", top ? `${top.name} ${pct(top.apr, 1)}` : "–"],
-    ["Lowest APR", low ? `${low.name} ${pct(low.apr, 1)}` : "–"],
-    ["Open interest", usd(rows.reduce((s, r) => s + (r.oi || 0), 0))],
-  ];
+function renderCompare(q) {
+  $("table").className = "t-compare";
+  const venues = ADAPTERS.map(a => a.venue);
+  const by = new Map();
+  for (const r of state.rows) {
+    if (!isFinite(r.apr)) continue;
+    const k = canon(r.name);
+    if (!by.has(k)) by.set(k, { name: k, cells: new Map() });
+    const prev = by.get(k).cells.get(r.venue);
+    if (!prev || (r.oi || 0) > (prev.oi || 0)) by.get(k).cells.set(r.venue, r);   // one market per venue: highest OI
+  }
+  let rows = [...by.values()].filter(a => a.cells.size >= 2 && (!q || a.name.toLowerCase().includes(q)));
+  for (const a of rows) {
+    const e = [...a.cells.values()];
+    a.hi = e.reduce((m, r) => (r.apr > m.apr ? r : m)); a.lo = e.reduce((m, r) => (r.apr < m.apr ? r : m));
+    a.spread = a.hi.apr - a.lo.apr; a.n = e.length;
+  }
+  const key = ["name", "spread", "n"].includes(state.sort) ? state.sort : "spread";
+  rows.sort(cmp(key, key === state.sort ? state.dir : -1));
+  const heads = [th("Asset", "name", key === "name", state.dir, false, () => setSort("name", true)),
+                 th("Spread APR", "spread", key === "spread", state.dir, false, () => setSort("spread", false)),
+                 th("Venues", "n", key === "n", state.dir, false, () => setSort("n", false)),
+                 ...venues.map(v => { const h = document.createElement("th"); h.textContent = v; h.style.cursor = "default"; return h; }),
+                 th("Trade", "", false, 1, false, () => {})];
+  heads[heads.length - 1].style.cursor = "default";
+  $("head").replaceChildren(...heads);
+  const frag = document.createDocumentFragment();
+  for (const a of rows) {
+    const tr = document.createElement("tr");
+    tr.append(td(a.name), td(fmt.pct(a.spread, 1), "pos"), td(String(a.n)));
+    for (const v of venues) { const r = a.cells.get(v); tr.append(r ? td(fmt.pct(r.apr, 1), signCls(r.apr)) : td("·", "na")); }
+    tr.append(td(`long ${a.lo.venue} / short ${a.hi.venue}`));
+    frag.append(tr);
+  }
+  $("body").replaceChildren(frag);
+  return rows;
+}
+
+function render() {
+  renderVenues();
+  const q = state.q.trim().toLowerCase();
+  const rows = state.view === "markets" ? renderMarkets(q) : renderCompare(q);
+  const stats = [];
+  if (state.view === "markets") {
+    const fin = rows.filter(r => isFinite(r.apr));
+    const top = fin.reduce((a, b) => (b.apr > (a?.apr ?? -Infinity) ? b : a), null);
+    const low = fin.reduce((a, b) => (b.apr < (a?.apr ?? Infinity) ? b : a), null);
+    stats.push(["Markets", rows.length],
+      ["Avg APR", fmt.pct(fin.length ? fin.reduce((s, r) => s + r.apr, 0) / fin.length : NaN, 1)],
+      ["Highest APR", top ? `${top.name} (${top.venue}) ${fmt.pct(top.apr, 1)}` : "–"],
+      ["Lowest APR", low ? `${low.name} (${low.venue}) ${fmt.pct(low.apr, 1)}` : "–"],
+      ["Open interest", fmt.usd(rows.reduce((s, r) => s + (r.oi || 0), 0))]);
+  } else {
+    const t = rows[0];
+    stats.push(["Assets on 2+ venues", rows.length],
+      ["Widest spread", t ? `${t.name} ${fmt.pct(t.spread, 1)}` : "–"],
+      ["Best pair", t ? `long ${t.lo.venue} / short ${t.hi.venue}` : "–"]);
+  }
   $("stats").replaceChildren(...stats.map(([l, v]) => {
     const d = document.createElement("div"); d.className = "stat";
     const b = document.createElement("b"); b.textContent = v;
@@ -228,20 +336,18 @@ function render() {
   }));
 }
 
+$("venue").replaceChildren(new Option("All venues", ""), ...ADAPTERS.map(a => new Option(a.venue, a.venue)));
+$("venue").onchange = e => { state.venue = e.target.value; render(); };
+$("q").oninput = e => { state.q = e.target.value; render(); };
 $("tabs").onclick = e => {
-  const g = e.target.dataset.g; if (!g) return;
-  state.group = g;
-  for (const b of $("tabs").children) b.setAttribute("aria-pressed", String(b.dataset.g === g));
+  const v = e.target.dataset.view; if (!v) return;
+  state.view = v; state.sort = v === "markets" ? "apr" : "spread"; state.dir = -1;
+  tabs.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
   render();
 };
-$("dex").onchange = e => { state.dex = e.target.value; render(); };
-$("q").oninput = e => { state.q = e.target.value; render(); };
-
-(async function init() {
-  try { await loadDexes(); } catch (e) { setStatus("err", "Could not load dex list: " + e.message); return; }
-  await refresh();
-  setInterval(refresh, REFRESH_MS);
-})();
+render();
+tick();
+setInterval(tick, REFRESH_MS);
 </script>
 </body>
 </html>
