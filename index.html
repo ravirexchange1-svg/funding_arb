@@ -150,6 +150,13 @@ const ADAPTERS = [
         return row("Paradex", x.symbol.replace("-USD-PERP", ""), mark, num(x.funding_rate) / 8, num(x.open_interest) * mark, num(x.volume_24h));
       });
   } },
+  { id: "dydx", venue: "dYdX", every: REFRESH_MS, async fetch() {
+      const d = await getJSON("https://indexer.dydx.trade/v4/perpetualMarkets");
+      return Object.values(d.markets).filter(m => m.status === "ACTIVE").map(m => {
+        const mark = num(m.oraclePrice);
+        return row("dYdX", m.ticker.replace("-USD", ""), mark, num(m.nextFundingRate), num(m.openInterest) * mark, num(m.volume24H));
+      });
+  } },
   { id: "pacifica", venue: "Pacifica", every: REFRESH_MS, async fetch() {
       const d = await getJSON("https://api.pacifica.fi/api/v1/info/prices");
       return d.data.map(x => row("Pacifica", x.symbol, num(x.mark), num(x.next_funding ?? x.funding), NaN, num(x.volume_24h)));
