@@ -97,7 +97,7 @@
       <label>Fee per trade, bps <input id="sc-fee" type="number" value="5" min="0" step="0.5"></label>
       <label>Min liquidity per leg <select id="sc-liq"><option value="250000">$250K</option><option value="1000000" selected>$1M</option><option value="5000000">$5M</option></select></label>
       <label><span>Only consistent</span><input id="sc-good" type="checkbox" checked></label>
-      <label><span>Include Paradex (slow)</span><input id="sc-paradex" type="checkbox"></label>
+      <label><span>Include Paradex (sampled)</span><input id="sc-paradex" type="checkbox" checked></label>
       <button id="sc-run" type="button">Scan all pairs</button>
     </div>
     <div class="note" id="sc-msg">Scans every liquid asset listed on two or more venues with funding history and ranks short/long pairings by how consistently they paid. Takes a minute or two.</div>
@@ -105,7 +105,7 @@
     <p class="note">
       Score is the lower of the net return over the window and the gross return over the last 7 days, so a pair must have paid over both. “Days up” is the share of days with positive funding.
       Liquidity is the smaller of open interest plus 24h volume across the two legs. Pairs whose prices differ by more than 5% are dropped as likely different tokens.
-      Venues without history (Variational, Extended, QFEX) and, on the hosted page, Aster are not scanned. Spread now is today’s estimate, shown for comparison only.
+      Paradex is sampled about every 12 hours, so its numbers are approximate. Extended and Aster need the local server. Variational and QFEX publish no history; on localhost they are recorded while the page is open and only appear once enough days have been recorded. Spread now is today’s estimate, shown for comparison only.
       The same caveats as Backtest apply: price gap, margin, slippage and fees can outweigh funding.
     </p>
   </section>
@@ -257,7 +257,7 @@ const ADAPTERS = [
       const d = await getJSON(EXTENDED_PROXY);
       return d.data.filter(m => m.type === "PERPETUAL" && m.status === "ACTIVE" && m.marketStats).map(m => {
         const st = m.marketStats;
-        return row("Extended", m.assetName || m.name.replace("-USD", ""), num(st.markPrice), num(st.fundingRate), num(st.openInterest), num(st.dailyVolume));
+        return row("Extended", m.assetName || m.name.replace("-USD", ""), num(st.markPrice), num(st.fundingRate), num(st.openInterest), num(st.dailyVolume), m.name);
       });
   } }] : []),
   { id: "qfex", venue: "QFEX", every: REFRESH_MS, async fetch() {
@@ -269,7 +269,7 @@ const ADAPTERS = [
       return [...qfex.funding.values()].map(f => {
         const mark = qfex.mark.get(f.symbol), usd = f.symbol.endsWith("-USD");
         return row("QFEX", usd ? f.symbol.replace("-USD", "") : f.symbol, mark, num(f.annualised_funding_rate) / 8760,
-          usd ? (qfex.oi.get(f.symbol) || NaN) * mark : NaN, NaN);
+          usd ? (qfex.oi.get(f.symbol) || NaN) * mark : NaN, NaN, f.symbol);
       });
   } },
   { id: "variational", venue: "Variational", every: 20000, async fetch() {
@@ -278,7 +278,7 @@ const ADAPTERS = [
       return d.listings.map(x => {
         const oi = x.open_interest || {};
         return row("Variational", x.ticker, num(x.mark_price), num(x.funding_rate) / 8760,
-          num(oi.long_open_interest) + num(oi.short_open_interest), num(x.volume_24h));
+          num(oi.long_open_interest) + num(oi.short_open_interest), num(x.volume_24h), x.ticker);
       });
   } },
 ];
@@ -323,6 +323,7 @@ async function tick() {
   $("dot").className = "dot " + (bad ? "err" : "live");
   $("status").textContent = (bad ? `${ADAPTERS.length - bad}/${ADAPTERS.length} venues ok` : "Live") + " · " + new Date().toLocaleTimeString();
   render();
+  recordSnapshot();
 }
 
 function renderVenues() {
@@ -503,10 +504,10 @@ const lighterHistory = venue => async (id, from) => {
   // Lighter's rate is a percentage; direction "short" means shorts pay longs (negative).
   return d.fundings.map(x => ({ t: x.timestamp * 1000, r: (x.direction === "short" ? -1 : 1) * num(x.rate) / 100 }));
 };
-async function paradexHistory(market, from) {
+async function paradexHistory(market, from, opts = {}) {
   // Paradex logs a rate every ~5 seconds, which is far too many rows to page through for weeks.
   // Take one sample per window (at most ~200 requests) and treat it as the rate for that whole window.
-  const now = Date.now(), stepH = Math.max(1, Math.ceil((now - from) / HOUR / 200)), step = stepH * HOUR;
+  const now = Date.now(), stepH = Math.max(1, Math.ceil((now - from) / HOUR / (opts.coarse ? 60 : 200))), step = stepH * HOUR;
   const wins = [];
   for (let t = from; t < now; t += step) wins.push(t);
   const out = [];
@@ -521,6 +522,29 @@ async function paradexHistory(market, from) {
   }));
   return out;
 }
+async function extendedHistory(market, from) {
+  if (!HAS_PROXY) throw new Error("Extended history is blocked in browsers. Run python3 serve.py (localhost) or set PROXY_BASE");
+  const d = await getJSON(`${PROXY_BASE}/extended-funding?market=${encodeURIComponent(market)}&startTime=${from}&endTime=${Date.now()}&limit=10000`);
+  return d.data.map(x => ({ t: x.T, r: num(x.f) }));   // hourly rate, one per hour
+}
+// Variational and QFEX publish no funding history. While this page is open on localhost it logs their live rates
+// through serve.py; each sample then counts for the time until the next one (capped at 15 minutes, so downtime shows as a gap).
+const recordedHistory = venue => async (id, from) => {
+  if (!LOCAL) throw new Error(`${venue} has no history API; recording works only on localhost (python3 serve.py)`);
+  const d = await getJSON(`/recorded?venue=${encodeURIComponent(venue)}&id=${encodeURIComponent(id)}&since=${from - HOUR}`);
+  return d.map(([t, h], i) => ({ t, r: h * Math.min(i ? t - d[i - 1][0] : 0, 15 * 60e3) / HOUR })).filter(e => e.r !== 0 || e.t > 0);
+};
+let lastRecorded = 0;
+async function recordSnapshot(force) {
+  if (!LOCAL || (!force && Date.now() - lastRecorded < 10 * 60e3)) return;
+  const t = Date.now();
+  const rows = state.rows.filter(r => (r.venue === "Variational" || r.venue === "QFEX") && r.id != null && isFinite(r.hourly) && size(r) >= 1e5)
+    .map(r => [r.venue, r.id, t, r.hourly]);
+  if (!rows.length) return;
+  lastRecorded = t;
+  try { await fetch("/record", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rows) }); } catch { lastRecorded = 0; }
+}
+
 async function pacificaHistory(symbol, from) {
   const out = [];
   let cursor = "";
@@ -549,17 +573,18 @@ async function dydxHistory(ticker, from) {
 
 const HISTORY = {
   "Aster": asterHistory, "Lighter": lighterHistory("Lighter"), "RH Lighter": lighterHistory("RH Lighter"),
-  "Paradex": paradexHistory, "Pacifica": pacificaHistory, "dYdX": dydxHistory,
+  "Paradex": paradexHistory, "Pacifica": pacificaHistory, "dYdX": dydxHistory, "Extended": extendedHistory,
+  "Variational": recordedHistory("Variational"), "QFEX": recordedHistory("QFEX"),
 };
 for (const a of ADAPTERS) if (a.id.startsWith("hl:")) HISTORY[a.venue] = hlHistory;
 
 const histCache = new Map();
-async function loadHistory(r, days) {
-  const key = r.venue + "|" + r.id + "|" + days;
+async function loadHistory(r, days, opts) {
+  const key = r.venue + "|" + r.id + "|" + days + "|" + (opts?.coarse ? "c" : "");
   const hit = histCache.get(key);
   if (hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
   const from = Date.now() - days * DAY;
-  const v = (await HISTORY[r.venue](r.id, from)).filter(e => isFinite(e.r) && e.t >= from && e.t <= Date.now()).sort((a, b) => a.t - b.t);
+  const v = (await HISTORY[r.venue](r.id, from, opts)).filter(e => isFinite(e.r) && e.t >= from && e.t <= Date.now()).sort((a, b) => a.t - b.t);
   histCache.set(key, { at: Date.now(), v });
   return v;
 }
@@ -758,7 +783,7 @@ async function runScan() {
   const msg = $("sc-msg"); msg.className = "note";
   const days = num($("sc-days").value), N = num($("sc-n").value) || 10000, fee = num($("sc-fee").value) || 0;
   const minLiq = num($("sc-liq").value), onlyGood = $("sc-good").checked, withParadex = $("sc-paradex").checked;
-  const usable = v => HISTORY[v] && (withParadex || v !== "Paradex") && (HAS_PROXY || v !== "Aster");
+  const usable = v => HISTORY[v] && (withParadex || v !== "Paradex") && (HAS_PROXY || (v !== "Aster" && v !== "Extended")) && (LOCAL || (v !== "Variational" && v !== "QFEX"));
   try {
     // 1. candidates: per asset, the most liquid market on each usable venue
     const byAsset = new Map();
@@ -773,16 +798,16 @@ async function runScan() {
     const markets = assets.flatMap(([, m]) => [...m.values()]);
     let done = 0;
     msg.textContent = `Loading ${days}-day history for ${markets.length} markets across ${assets.length} assets…`;
-    const hist = new Map(), bad = { n: 0, why: new Map() }, t1 = Date.now(), t0 = t1 - days * DAY, H = days * 24;
+    const used = new Map(), hist = new Map(), bad = { n: 0, why: new Map() }, t1 = Date.now(), t0 = t1 - days * DAY, H = days * 24;
     let i = 0;
     await Promise.all(Array.from({ length: 8 }, async () => {
       while (i < markets.length) {
         const r = markets[i++];
         try {
-          const ev = await loadHistory(r, days);
+          const ev = await loadHistory(r, days, { coarse: true });
           const q = dataCheck(ev, days, t1);
-          if (q.ok) hist.set(r, bucketize(ev, t0, H));
-          else { bad.n++; const k = q.issues[0].replace(/\d+/g, "#"); bad.why.set(k, (bad.why.get(k) || 0) + 1); }
+          if (q.ok) { hist.set(r, bucketize(ev, t0, H)); used.set(r.venue, (used.get(r.venue) || 0) + 1); }
+          else { bad.n++; const k = `${r.venue}: ${q.issues[0].replace(/\d+/g, "#")}`; bad.why.set(k, (bad.why.get(k) || 0) + 1); }
         } catch { bad.n++; bad.why.set("history request failed", (bad.why.get("history request failed") || 0) + 1); }
         msg.textContent = `Loading history… ${++done} of ${markets.length}`;
       }
@@ -801,7 +826,7 @@ async function runScan() {
     sc.rows = out.filter(r => !onlyGood || (r.aprNet > 0 && r.apr7 > 0 && r.posPct >= 0.55));
     sc.N = N; sc.days = days;
     const why = [...bad.why].map(([k, n]) => `${n} × ${k}`).join(", ");
-    msg.textContent = `Scanned ${markets.length - bad.n} of ${markets.length} markets with clean history (${bad.n} dropped${why ? ": " + why : ""}), ${out.length} pairings. ${sc.rows.length} shown` +
+    msg.textContent = `Scanned ${markets.length - bad.n} of ${markets.length} markets with clean history [${[...used].map(([v, n]) => v + " " + n).join(", ")}]. Dropped ${bad.n}${why ? ": " + why : ""}. ${out.length} pairings. ${sc.rows.length} shown` +
       (onlyGood ? " (net positive over the window and the last 7 days, profitable on at least 55% of days)." : ".") +
       ` Click a row to open it in Backtest.`;
     renderScan();
