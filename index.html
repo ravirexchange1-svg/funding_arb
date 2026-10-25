@@ -14,6 +14,7 @@
             --pos: #3ddc97; --neg: #ff6b81; --accent: #6b9bff; --chip: #212833; }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 1280px; margin: 0 auto; padding: 16px; }
@@ -49,6 +50,18 @@
   .pos { color: var(--pos); } .neg { color: var(--neg); } .na { color: var(--muted); }
   .bar { display: inline-block; height: 6px; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .t-compare tbody tr { cursor: pointer; }
+  .btform { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 10px; }
+  .btform label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+  .btform input, .btform select { width: 140px; }
+  .btform button { font: inherit; border: 0; border-radius: 6px; padding: 7px 14px; background: var(--accent); color: #fff; cursor: pointer; }
+  .btform button:disabled { opacity: .6; cursor: default; }
+  .warn { color: var(--neg); }
+  .chartwrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 10px; }
+  .chartwrap svg { width: 100%; height: auto; display: block; }
+  .chartwrap text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 2px 6px 6px; }
+  .legend i { display: inline-block; width: 14px; height: 3px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
   @media (max-width: 640px) { .hide-sm { display: none; } }
 </style>
 </head>
@@ -66,12 +79,36 @@
     <div class="tabs" id="tabs">
       <button data-view="markets" aria-pressed="true">By market</button>
       <button data-view="compare" aria-pressed="false">Compare venues</button>
+      <button data-view="backtest" aria-pressed="false">Backtest</button>
     </div>
     <select id="venue" aria-label="Venue"></select>
     <input id="q" type="search" placeholder="Search market…" aria-label="Search market">
   </div>
 
-  <div class="tablewrap">
+  <section id="bt" hidden>
+    <div class="btform">
+      <label>Asset <input id="bt-asset" list="bt-assets" placeholder="e.g. AI" autocomplete="off"></label>
+      <datalist id="bt-assets"></datalist>
+      <label>Short on (receives) <select id="bt-short"></select></label>
+      <label>Long on (pays) <select id="bt-long"></select></label>
+      <label>Per leg, USD <input id="bt-n" type="number" value="10000" min="100" step="100"></label>
+      <label>Days <select id="bt-days"><option>7</option><option>14</option><option selected>30</option><option>60</option><option>90</option></select></label>
+      <label>Fee per trade, bps <input id="bt-fee" type="number" value="5" min="0" step="0.5"></label>
+      <button id="bt-run" type="button">Run backtest</button>
+    </div>
+    <div class="note" id="bt-msg">Pick an asset and two venues, or click a row in Compare venues.</div>
+    <section class="stats" id="bt-stats"></section>
+    <div class="chartwrap" id="bt-chartwrap" hidden>
+      <div class="legend"><span><i style="background:var(--accent)"></i>Cumulative funding (gross)</span><span><i style="background:var(--pos)"></i>After fees</span></div>
+      <svg id="bt-chart" viewBox="0 0 800 300" role="img" aria-label="Cumulative funding PnL"></svg>
+    </div>
+    <p class="note" id="bt-note" hidden>
+      Assumes both legs are held for the whole window at a fixed notional, funding is paid on that notional at each settlement, and fees are charged on opening and closing both legs.
+      It ignores the price gap between the two venues (the main risk of this trade), margin, liquidation, borrow costs, slippage and transfer costs. Past funding does not predict future funding.
+    </p>
+  </section>
+
+  <div class="tablewrap" id="tablewrap">
     <table id="table">
       <thead><tr id="head"></tr></thead>
       <tbody id="body"></tbody>
@@ -81,17 +118,20 @@
     Funding is shown as an hourly rate; APR = hourly × 24 × 365, simple (positive: longs pay shorts). Venues quote funding over different
     intervals (1h, 4h, 8h), so each rate is divided by its interval. Aster shows the last settled rate, not a forecast.
     Pacifica open interest is left out because its API does not state the unit. In Compare, the spread is the gap between the highest and lowest APR for the same
-    asset; “long low / short high” is the pairing that collects it, before fees, borrow and price risk. Assets are matched by ticker only, so a very large spread can be two different tokens that share a name; check before trading.
-    Ondo, QFEX, Phoenix, RISEx, TXFlow and Arcus are not included yet because they have no public browser-readable API I could verify.
+    asset; “long low / short high” is the pairing that collects it, before fees, borrow and price risk. Search matches part of a name (BTC also finds BTCD and BTCDOM). Aster lists extra quote currencies as, for example, “BTC USDC”. Assets are matched by ticker only, so a very large spread can be two different tokens that share a name; check before trading.
+    Ondo, Phoenix, RISEx, TXFlow and Arcus are not included yet because they have no public browser-readable API I could verify.
   </p>
 </main>
 
 <script>
 const REFRESH_MS = 10000;
 const HL = "https://api.hyperliquid.xyz/info";
-// Extended sends no CORS header. Running `python3 serve.py` relays it at /extended on localhost; a deployed
-// Cloudflare Worker (worker/extended-proxy.js) also works: paste its URL here. Empty hides Extended.
-const EXTENDED_PROXY = ["localhost", "127.0.0.1"].includes(location.hostname) ? "/extended" : "";
+// Extended markets and Aster funding history send no CORS header. `python3 serve.py` relays them from localhost
+// (/extended, /aster-funding); on a hosted copy, deploy worker/extended-proxy.js and put its base URL in PROXY_BASE.
+const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const PROXY_BASE = "";
+const HAS_PROXY = LOCAL || !!PROXY_BASE;
+const EXTENDED_PROXY = HAS_PROXY ? PROXY_BASE + "/extended" : "";
 
 const HL_NAMES = { io: "Entropy", km: "Kinetic", mkts: "Kinetiq (mkts)", xyz: "trade.xyz", flx: "Felix", vntl: "Ventuals",
                    hyna: "HyENA", abcd: "ABCDEx", cash: "dreamcash", para: "Paragon" };
@@ -102,7 +142,7 @@ async function getJSON(url, opts) {
   return r.json();
 }
 const num = v => (v == null || v === "" ? NaN : Number(v));
-const row = (venue, name, mark, hourly, oi, vol) => ({ venue, name, mark, hourly, apr: hourly * 8760, oi, vol });
+const row = (venue, name, mark, hourly, oi, vol, id) => ({ venue, name, mark, hourly, apr: hourly * 8760, oi, vol, id });
 const hlPost = body => getJSON(HL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 // Each adapter returns an array of rows: { venue, name, mark, hourly, apr, oi (USD), vol (USD) }.
@@ -114,7 +154,7 @@ function hlAdapter(dex) {
     meta.universe.forEach((u, i) => {
       const c = ctxs[i]; if (!c || u.isDelisted) return;
       const mark = num(c.markPx);
-      out.push(row(venue, u.name.includes(":") ? u.name.split(":")[1] : u.name, mark, num(c.funding), num(c.openInterest) * mark, num(c.dayNtlVlm)));
+      out.push(row(venue, u.name.includes(":") ? u.name.split(":")[1] : u.name, mark, num(c.funding), num(c.openInterest) * mark, num(c.dayNtlVlm), u.name));
     });
     return out;
   } };
@@ -125,9 +165,34 @@ function lighterAdapter(venue, host) {
     const [fr, ob] = await Promise.all([getJSON(host + "/api/v1/funding-rates"), getJSON(host + "/api/v1/orderBookDetails")]);
     const rates = new Map(fr.funding_rates.filter(x => x.exchange === "lighter").map(x => [x.market_id, x.rate]));
     return ob.order_book_details.filter(m => m.market_type === "perp" && m.status === "active" && rates.has(m.market_id))
-      .map(m => row(venue, m.symbol, num(m.mark_price), num(rates.get(m.market_id)), num(m.open_interest_usd), num(m.daily_quote_token_volume)));
+      .map(m => row(venue, m.symbol, num(m.mark_price), num(rates.get(m.market_id)), num(m.open_interest_usd), num(m.daily_quote_token_volume), m.market_id));
   } };
 }
+
+// QFEX publishes market data only over a public websocket, so keep one open and read its latest values.
+const qfex = { ws: null, funding: new Map(), mark: new Map(), oi: new Map(), opening: null };
+function qfexConnect() {
+  if (qfex.opening) return qfex.opening;
+  qfex.opening = new Promise((resolve, reject) => {
+    const ws = new WebSocket("wss://mds.qfex.com/");
+    qfex.ws = ws;
+    ws.onopen = () => { ws.send(JSON.stringify({ type: "subscribe", channels: ["funding", "mark_price", "open_interest"], symbols: ["*"] })); resolve(); };
+    ws.onerror = () => reject(new Error("websocket error"));
+    ws.onclose = () => { qfex.ws = null; qfex.opening = null; };
+    ws.onmessage = e => {
+      let d; try { d = JSON.parse(e.data); } catch { return; }
+      if (d.type === "funding") qfex.funding.set(d.symbol, d);
+      else if (d.type === "mark_price") qfex.mark.set(d.symbol, num(d.price));
+      else if (d.type === "open_interest") qfex.oi.set(d.symbol, num(d.open_interest));
+    };
+  });
+  return qfex.opening;
+}
+
+const asterName = sym => {
+  const m = sym.match(/^(.+?)(USDT|USDC|USD1|USD)$/);
+  return !m ? sym : m[2] === "USDT" ? m[1] : `${m[1]} ${m[2]}`;
+};
 
 const ADAPTERS = [
   hlAdapter(""),
@@ -137,8 +202,9 @@ const ADAPTERS = [
       const [pi, fi, tk] = await Promise.all([getJSON(b + "premiumIndex"), getJSON(b + "fundingInfo"), getJSON(b + "ticker/24hr")]);
       const hrs = new Map(fi.map(x => [x.symbol, x.fundingIntervalHours || 8]));
       const vol = new Map(tk.map(x => [x.symbol, num(x.quoteVolume)]));
-      return pi.map(x => row("Aster", x.symbol.replace(/(USDT|USDC|USD1|USD)$/, ""), num(x.markPrice),
-        num(x.lastFundingRate) / (hrs.get(x.symbol) || 8), NaN, vol.get(x.symbol) ?? NaN));
+      // Aster lists one coin against several quotes (BTCUSDT, BTCUSDC, BTCUSD1...). Plain name = the USDT market; others keep their quote.
+      return pi.map(x => row("Aster", asterName(x.symbol), num(x.markPrice),
+        num(x.lastFundingRate) / (hrs.get(x.symbol) || 8), NaN, vol.get(x.symbol) ?? NaN, x.symbol));
   } },
   lighterAdapter("Lighter", "https://mainnet.zklighter.elliot.ai"),
   lighterAdapter("RH Lighter", "https://api.rh.lighter.xyz"),
@@ -147,19 +213,19 @@ const ADAPTERS = [
       // Paradex quotes funding over an 8h period.
       return d.results.filter(x => x.symbol.endsWith("-PERP")).map(x => {
         const mark = num(x.mark_price);
-        return row("Paradex", x.symbol.replace("-USD-PERP", ""), mark, num(x.funding_rate) / 8, num(x.open_interest) * mark, num(x.volume_24h));
+        return row("Paradex", x.symbol.replace("-USD-PERP", ""), mark, num(x.funding_rate) / 8, num(x.open_interest) * mark, num(x.volume_24h), x.symbol);
       });
   } },
   { id: "dydx", venue: "dYdX", every: REFRESH_MS, async fetch() {
       const d = await getJSON("https://indexer.dydx.trade/v4/perpetualMarkets");
       return Object.values(d.markets).filter(m => m.status === "ACTIVE").map(m => {
         const mark = num(m.oraclePrice);
-        return row("dYdX", m.ticker.replace("-USD", ""), mark, num(m.nextFundingRate), num(m.openInterest) * mark, num(m.volume24H));
+        return row("dYdX", m.ticker.replace("-USD", ""), mark, num(m.nextFundingRate), num(m.openInterest) * mark, num(m.volume24H), m.ticker);
       });
   } },
   { id: "pacifica", venue: "Pacifica", every: REFRESH_MS, async fetch() {
       const d = await getJSON("https://api.pacifica.fi/api/v1/info/prices");
-      return d.data.map(x => row("Pacifica", x.symbol, num(x.mark), num(x.next_funding ?? x.funding), NaN, num(x.volume_24h)));
+      return d.data.map(x => row("Pacifica", x.symbol, num(x.mark), num(x.next_funding ?? x.funding), NaN, num(x.volume_24h), x.symbol));
   } },
   ...(EXTENDED_PROXY ? [{ id: "extended", venue: "Extended", every: REFRESH_MS, async fetch() {
       const d = await getJSON(EXTENDED_PROXY);
@@ -168,6 +234,18 @@ const ADAPTERS = [
         return row("Extended", m.assetName || m.name.replace("-USD", ""), num(st.markPrice), num(st.fundingRate), num(st.openInterest), num(st.dailyVolume));
       });
   } }] : []),
+  { id: "qfex", venue: "QFEX", every: REFRESH_MS, async fetch() {
+      const fresh = !qfex.funding.size;
+      await qfexConnect();
+      if (fresh) await new Promise(r => setTimeout(r, 4000));
+      if (!qfex.funding.size) throw new Error("no funding data yet");
+      // The raw rate is rounded to 5 decimals, so use QFEX's own annualised figure.
+      return [...qfex.funding.values()].map(f => {
+        const mark = qfex.mark.get(f.symbol), usd = f.symbol.endsWith("-USD");
+        return row("QFEX", usd ? f.symbol.replace("-USD", "") : f.symbol, mark, num(f.annualised_funding_rate) / 8760,
+          usd ? (qfex.oi.get(f.symbol) || NaN) * mark : NaN, NaN);
+      });
+  } },
   { id: "variational", venue: "Variational", every: 20000, async fetch() {
       const d = await getJSON("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats");
       // funding_rate here is already annualised (e.g. 0.1095 = 10.95% APR).
@@ -237,6 +315,7 @@ function renderVenues() {
   }));
 }
 
+const size = r => (isFinite(r.oi) ? r.oi : 0) + (isFinite(r.vol) ? r.vol : 0);
 function canon(name) {
   let s = name.replace(/^k(?=[A-Z])/, "").toUpperCase();
   return s.replace(/^(1000000|1000|1M)(?=[A-Z])/, "");
@@ -296,7 +375,7 @@ function renderCompare(q) {
     const k = canon(r.name);
     if (!by.has(k)) by.set(k, { name: k, cells: new Map() });
     const prev = by.get(k).cells.get(r.venue);
-    if (!prev || (r.oi || 0) > (prev.oi || 0)) by.get(k).cells.set(r.venue, r);   // one market per venue: highest OI
+    if (!prev || size(r) > size(prev)) by.get(k).cells.set(r.venue, r);   // one market per venue: highest OI
   }
   let rows = [...by.values()].filter(a => a.cells.size >= 2 && (!q || a.name.toLowerCase().includes(q)));
   for (const a of rows) {
@@ -319,6 +398,8 @@ function renderCompare(q) {
     tr.append(td(a.name), td(fmt.pct(a.spread, 1), "pos"), td(String(a.n)));
     for (const v of venues) { const r = a.cells.get(v); tr.append(r ? td(fmt.pct(r.apr, 1), signCls(r.apr)) : td("·", "na")); }
     tr.append(td(`long ${a.lo.venue} / short ${a.hi.venue}`));
+    tr.title = "Click to backtest this pair";
+    tr.onclick = () => openBacktest(a.name, a.hi.venue, a.lo.venue);
     frag.append(tr);
   }
   $("body").replaceChildren(frag);
@@ -327,6 +408,10 @@ function renderCompare(q) {
 
 function render() {
   renderVenues();
+  const isBt = state.view === "backtest";
+  for (const id of ["tablewrap", "stats", "venue", "q"]) $(id).hidden = isBt;
+  $("bt").hidden = !isBt;
+  if (isBt) { refreshBtOptions(); return; }
   const q = state.q.trim().toLowerCase();
   const rows = state.view === "markets" ? renderMarkets(q) : renderCompare(q);
   const stats = [];
@@ -353,12 +438,257 @@ function render() {
   }));
 }
 
+/* ---------------- Backtest ---------------- */
+// Each fetcher returns [{ t: ms, r }] where r is the funding rate paid at that settlement
+// (positive: longs pay shorts). Rates are per settlement, so venues with different intervals mix correctly.
+const HOUR = 3600e3, DAY = 24 * HOUR;
+const LIGHTER_HOSTS = { "Lighter": "https://mainnet.zklighter.elliot.ai", "RH Lighter": "https://api.rh.lighter.xyz" };
+
+async function hlHistory(coin, from) {
+  const out = [];
+  let s = from;
+  for (let i = 0; i < 12; i++) {
+    const d = await hlPost({ type: "fundingHistory", coin, startTime: s });
+    if (!d.length) break;
+    out.push(...d.map(x => ({ t: x.time, r: num(x.fundingRate) })));
+    if (d.length < 500) break;
+    s = d[d.length - 1].time + 1;
+  }
+  return out;
+}
+async function asterHistory(symbol, from) {
+  if (!HAS_PROXY) throw new Error("Aster history is blocked in browsers. Run python3 serve.py (localhost) or set PROXY_BASE");
+  const out = [];
+  let s = from;
+  for (let i = 0; i < 10; i++) {
+    const d = await getJSON(`${PROXY_BASE}/aster-funding?symbol=${encodeURIComponent(symbol)}&startTime=${s}&limit=1000`);
+    if (!d.length) break;
+    out.push(...d.map(x => ({ t: x.fundingTime, r: num(x.fundingRate) })));
+    if (d.length < 1000) break;
+    s = d[d.length - 1].fundingTime + 1;
+  }
+  return out;
+}
+const lighterHistory = venue => async (id, from) => {
+  const now = Date.now();
+  const d = await getJSON(`${LIGHTER_HOSTS[venue]}/api/v1/fundings?market_id=${id}&resolution=1h&start_timestamp=${Math.floor(from / 1000)}&end_timestamp=${Math.floor(now / 1000)}&count_back=0`);
+  // Lighter's rate is a percentage; direction "short" means shorts pay longs (negative).
+  return d.fundings.map(x => ({ t: x.timestamp * 1000, r: (x.direction === "short" ? -1 : 1) * num(x.rate) / 100 }));
+};
+async function paradexHistory(market, from) {
+  // Paradex logs a rate every ~5 seconds, which is far too many rows to page through for weeks.
+  // Take one sample per window (at most ~200 requests) and treat it as the rate for that whole window.
+  const now = Date.now(), stepH = Math.max(1, Math.ceil((now - from) / HOUR / 200)), step = stepH * HOUR;
+  const wins = [];
+  for (let t = from; t < now; t += step) wins.push(t);
+  const out = [];
+  let i = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (i < wins.length) {
+      const t = wins[i++];
+      const d = await getJSON(`https://api.prod.paradex.trade/v1/funding/data?market=${encodeURIComponent(market)}&start_at=${t}&end_at=${Math.min(t + step, now)}&page_size=1`);
+      const x = d.results[0];
+      if (x) out.push({ t: Math.min(t + step, now), r: num(x.funding_rate) / (x.funding_period_hours || 8) * stepH });
+    }
+  }));
+  return out;
+}
+async function pacificaHistory(symbol, from) {
+  const out = [];
+  let cursor = "";
+  for (let i = 0; i < 6; i++) {
+    const d = await getJSON(`https://api.pacifica.fi/api/v1/funding_rate/history?symbol=${encodeURIComponent(symbol)}&limit=4000${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`);
+    out.push(...d.data.map(x => ({ t: x.created_at, r: num(x.funding_rate) })));
+    if (!d.has_more || !d.data.length || d.data[d.data.length - 1].created_at < from) break;
+    cursor = d.next_cursor;
+  }
+  return out;
+}
+async function dydxHistory(ticker, from) {
+  const out = [];
+  let before = "";
+  for (let i = 0; i < 10; i++) {
+    const d = await getJSON(`https://indexer.dydx.trade/v4/historicalFunding/${encodeURIComponent(ticker)}?limit=1000${before ? "&effectiveBeforeOrAt=" + encodeURIComponent(before) : ""}`);
+    const rows = d.historicalFunding;
+    if (!rows.length) break;
+    out.push(...rows.map(x => ({ t: Date.parse(x.effectiveAt), r: num(x.rate) })));
+    const oldest = out[out.length - 1].t;
+    if (rows.length < 1000 || oldest < from) break;
+    before = new Date(oldest - 1).toISOString();
+  }
+  return out;
+}
+
+const HISTORY = {
+  "Aster": asterHistory, "Lighter": lighterHistory("Lighter"), "RH Lighter": lighterHistory("RH Lighter"),
+  "Paradex": paradexHistory, "Pacifica": pacificaHistory, "dYdX": dydxHistory,
+};
+for (const a of ADAPTERS) if (a.id.startsWith("hl:")) HISTORY[a.venue] = hlHistory;
+
+const histCache = new Map();
+async function loadHistory(r, days) {
+  const key = r.venue + "|" + r.id + "|" + days;
+  const hit = histCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
+  const from = Date.now() - days * DAY;
+  const v = (await HISTORY[r.venue](r.id, from)).filter(e => isFinite(e.r) && e.t >= from && e.t <= Date.now()).sort((a, b) => a.t - b.t);
+  histCache.set(key, { at: Date.now(), v });
+  return v;
+}
+
+// Cheapest way to a pair: for one asset, the row on each venue with the most open interest.
+function marketsFor(asset) {
+  const by = new Map();
+  for (const r of state.rows) {
+    if (!HISTORY[r.venue] || r.id == null || canon(r.name) !== asset) continue;
+    const prev = by.get(r.venue);
+    if (!prev || size(r) > size(prev)) by.set(r.venue, r);
+  }
+  return by;
+}
+
+function backtest(shortEv, longEv, notional, feeBps, t0, t1) {
+  const items = [...shortEv.map(e => ({ t: e.t, d: notional * e.r, leg: "s" })), ...longEv.map(e => ({ t: e.t, d: -notional * e.r, leg: "l" }))].sort((a, b) => a.t - b.t);
+  const fee = notional * feeBps / 1e4, openFee = 2 * fee, closeFee = 2 * fee;
+  let cum = 0, peak = 0, maxDd = 0, got = 0, paid = 0;
+  const gross = [[t0, 0]], net = [[t0, -openFee]], daily = new Map();
+  for (const it of items) {
+    cum += it.d; if (it.leg === "s") got += it.d; else paid += it.d;
+    peak = Math.max(peak, cum); maxDd = Math.max(maxDd, peak - cum);
+    gross.push([it.t, cum]); net.push([it.t, cum - openFee]);
+    const day = Math.floor(it.t / DAY); daily.set(day, (daily.get(day) || 0) + it.d);
+  }
+  gross.push([t1, cum]); net.push([t1, cum - openFee - closeFee]);
+  const d = [...daily.values()];
+  const recentCut = t1 - 7 * DAY;
+  const recent = items.filter(i => i.t >= recentCut).reduce((s, i) => s + i.d, 0);
+  return { gross, net, total: cum, got, paid, openFee, closeFee, netTotal: cum - openFee - closeFee, maxDd,
+    posDays: d.filter(x => x > 0).length, days: d.length, worstDay: d.length ? Math.min(...d) : NaN, bestDay: d.length ? Math.max(...d) : NaN,
+    recentApr: recent / (2 * notional) * 365 / 7 };
+}
+
+const usdSigned = v => (isFinite(v) ? (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 }) : "–");
+const usd2 = v => (isFinite(v) ? (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "–");
+
+function drawChart(res, t0, t1) {
+  const svg = $("bt-chart"), NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const W = 800, H = 300, L = 58, R = 14, T = 12, B = 26;
+  const all = [...res.gross, ...res.net].map(p => p[1]).concat(0);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const X = t => L + (t - t0) / (t1 - t0) * (W - L - R), Y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  const el = (n, a, txt) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; svg.append(e); return e; };
+  const step = niceStep((hi - lo) / 4);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    el("line", { x1: L, x2: W - R, y1: Y(v), y2: Y(v), stroke: "var(--line)", "stroke-width": v === 0 ? 1.5 : 1 });
+    el("text", { x: L - 6, y: Y(v) + 4, "text-anchor": "end" }, usdSigned(v));
+  }
+  for (let i = 0; i <= 4; i++) {
+    const t = t0 + (t1 - t0) * i / 4;
+    el("text", { x: X(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle" }, new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
+  }
+  const path = (pts, color, dash) => el("path", { d: pts.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join(""), fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", ...(dash ? { "stroke-dasharray": dash } : {}) });
+  path(res.gross, "var(--accent)"); path(res.net, "var(--pos)", "5 3");
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw || 1))), m = raw / p;
+  return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p;
+}
+
+const bt = { busy: false };
+function setView(v) { state.view = v; tabs.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === v))); }
+
+function btAssets() {
+  const count = new Map();
+  for (const r of state.rows) if (HISTORY[r.venue] && r.id != null) { const k = canon(r.name); count.set(k, (count.get(k) || new Set()).add(r.venue)); }
+  return [...count].filter(([, v]) => v.size >= 2).map(([k]) => k).sort();
+}
+
+function refreshBtOptions() {
+  const dl = $("bt-assets");
+  if (!dl.childElementCount) dl.replaceChildren(...btAssets().map(a => new Option(a)));
+  fillVenueSelects(false);
+}
+
+function fillVenueSelects(pick) {
+  const asset = canon($("bt-asset").value.trim());
+  const by = marketsFor(asset);
+  const venues = [...by.keys()];
+  const keep = [$("bt-short").value, $("bt-long").value];
+  for (const [id, i] of [["bt-short", 0], ["bt-long", 1]]) $(id).replaceChildren(...venues.map(v => new Option(`${v}  ${fmt.pct(by.get(v).apr, 1)} APR`, v)));
+  if (!venues.length) return;
+  const sorted = [...by.values()].sort((a, b) => b.apr - a.apr);
+  const dflt = [sorted[0].venue, sorted[sorted.length - 1].venue];
+  $("bt-short").value = !pick && venues.includes(keep[0]) ? keep[0] : dflt[0];
+  $("bt-long").value = !pick && venues.includes(keep[1]) ? keep[1] : dflt[1];
+}
+
+function openBacktest(asset, shortVenue, longVenue) {
+  setView("backtest");
+  $("bt-asset").value = asset;
+  render();
+  fillVenueSelects(true);
+  if (HISTORY[shortVenue] && HISTORY[longVenue]) { $("bt-short").value = shortVenue; $("bt-long").value = longVenue; runBacktest(); }
+  else $("bt-msg").textContent = `No funding history API for ${[shortVenue, longVenue].filter(v => !HISTORY[v]).join(" / ")}. Pick other venues.`;
+}
+
+async function runBacktest() {
+  if (bt.busy) return;
+  const asset = canon($("bt-asset").value.trim()), sv = $("bt-short").value, lv = $("bt-long").value;
+  const msg = $("bt-msg");
+  const by = marketsFor(asset);
+  if (!by.has(sv) || !by.has(lv)) { msg.textContent = "Choose an asset listed on two venues that have funding history."; return; }
+  if (sv === lv) { msg.textContent = "Pick two different venues."; return; }
+  const N = num($("bt-n").value), days = num($("bt-days").value), fee = num($("bt-fee").value) || 0;
+  if (!(N > 0)) { msg.textContent = "Enter a notional above 0."; return; }
+  bt.busy = true; $("bt-run").disabled = true; msg.className = "note"; msg.textContent = "Loading funding history…";
+  try {
+    const sr = by.get(sv), lr = by.get(lv);
+    const [se, le] = await Promise.all([loadHistory(sr, days), loadHistory(lr, days)]);
+    if (!se.length || !le.length) throw new Error(`No funding history returned for ${!se.length ? sv : lv}`);
+    const t1 = Date.now(), t0 = t1 - days * DAY;
+    const res = backtest(se, le, N, fee, t0, t1);
+    const gap = Math.abs(sr.mark - lr.mark) / Math.min(sr.mark, lr.mark);
+    const cover = d => Math.round((t1 - d[0].t) / DAY);
+    const notes = [];
+    if (gap > 0.05) notes.push(`Prices differ by ${(gap * 100).toFixed(0)}% (${sv} ${fmt.px(sr.mark)} vs ${lv} ${fmt.px(lr.mark)}): these may be different tokens that share a ticker.`);
+    for (const [v, d] of [[sv, se], [lv, le]]) if (cover(d) < days - 1) notes.push(`${v} history covers only ${cover(d)} days.`);
+    msg.className = "note" + (gap > 0.05 ? " warn" : "");
+    msg.textContent = `Short ${asset} on ${sv}, long on ${lv}: ${usdSigned(N)} per leg, ${days} days. ` + notes.join(" ");
+    const cap = 2 * N, annNet = res.netTotal / cap * 365 / days;
+    const tiles = [
+      ["Funding earned (net of legs)", usd2(res.total)],
+      ["After fees", usd2(res.netTotal)],
+      ["Return on " + usdSigned(cap), fmt.pct(res.netTotal / cap, 2) + " (" + fmt.pct(annNet, 1) + " APR)"],
+      ["Profitable days", `${res.posDays} of ${res.days}`],
+      ["Worst / best day", `${usd2(res.worstDay)} / ${usd2(res.bestDay)}`],
+      ["Max drawdown", usd2(-res.maxDd)],
+      [`Short leg on ${sv}`, usd2(res.got)],
+      [`Long leg on ${lv}`, usd2(res.paid)],
+      ["Last 7 days APR (gross)", fmt.pct(res.recentApr, 1)],
+    ];
+    $("bt-stats").replaceChildren(...tiles.map(([l, v]) => {
+      const d = document.createElement("div"); d.className = "stat";
+      const b = document.createElement("b"); b.textContent = v; const s = document.createElement("span"); s.textContent = l; d.append(b, s); return d;
+    }));
+    $("bt-chartwrap").hidden = false; $("bt-note").hidden = false;
+    drawChart(res, t0, t1);
+  } catch (e) {
+    msg.className = "note warn"; msg.textContent = "Backtest failed: " + e.message;
+  } finally { bt.busy = false; $("bt-run").disabled = false; }
+}
+$("bt-run").onclick = runBacktest;
+$("bt-asset").oninput = () => fillVenueSelects(true);
+$("bt-asset").onchange = () => fillVenueSelects(true);
+
 $("venue").replaceChildren(new Option("All venues", ""), ...ADAPTERS.map(a => new Option(a.venue, a.venue)));
 $("venue").onchange = e => { state.venue = e.target.value; render(); };
 $("q").oninput = e => { state.q = e.target.value; render(); };
 $("tabs").onclick = e => {
   const v = e.target.dataset.view; if (!v) return;
-  state.view = v; state.sort = v === "markets" ? "apr" : "spread"; state.dir = -1;
+  state.view = v; state.sort = v === "markets" ? "apr" : "spread"; state.dir = -1; setView(v);
   tabs.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
   render();
 };
