@@ -89,8 +89,9 @@
 <script>
 const REFRESH_MS = 10000;
 const HL = "https://api.hyperliquid.xyz/info";
-// Paste your deployed Cloudflare Worker URL (see worker/extended-proxy.js) to enable Extended. Leave empty to hide it.
-const EXTENDED_PROXY = "";
+// Extended sends no CORS header. Running `python3 serve.py` relays it at /extended on localhost; a deployed
+// Cloudflare Worker (worker/extended-proxy.js) also works: paste its URL here. Empty hides Extended.
+const EXTENDED_PROXY = ["localhost", "127.0.0.1"].includes(location.hostname) ? "/extended" : "";
 
 const HL_NAMES = { io: "Entropy", km: "Kinetic", mkts: "Kinetiq (mkts)", xyz: "trade.xyz", flx: "Felix", vntl: "Ventuals",
                    hyna: "HyENA", abcd: "ABCDEx", cash: "dreamcash", para: "Paragon" };
