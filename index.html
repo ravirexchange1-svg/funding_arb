@@ -82,13 +82,15 @@
     intervals (1h, 4h, 8h), so each rate is divided by its interval. Aster shows the last settled rate, not a forecast.
     Pacifica open interest is left out because its API does not state the unit. In Compare, the spread is the gap between the highest and lowest APR for the same
     asset; “long low / short high” is the pairing that collects it, before fees, borrow and price risk. Assets are matched by ticker only, so a very large spread can be two different tokens that share a name; check before trading.
-    Extended, Ondo, QFEX, Phoenix, RISEx, TXFlow and Arcus are not included yet because they have no public browser-readable API I could verify.
+    Ondo, QFEX, Phoenix, RISEx, TXFlow and Arcus are not included yet because they have no public browser-readable API I could verify.
   </p>
 </main>
 
 <script>
 const REFRESH_MS = 10000;
 const HL = "https://api.hyperliquid.xyz/info";
+// Paste your deployed Cloudflare Worker URL (see worker/extended-proxy.js) to enable Extended. Leave empty to hide it.
+const EXTENDED_PROXY = "";
 
 const HL_NAMES = { io: "Entropy", km: "Kinetic", mkts: "Kinetiq (mkts)", xyz: "trade.xyz", flx: "Felix", vntl: "Ventuals",
                    hyna: "HyENA", abcd: "ABCDEx", cash: "dreamcash", para: "Paragon" };
@@ -151,6 +153,13 @@ const ADAPTERS = [
       const d = await getJSON("https://api.pacifica.fi/api/v1/info/prices");
       return d.data.map(x => row("Pacifica", x.symbol, num(x.mark), num(x.next_funding ?? x.funding), NaN, num(x.volume_24h)));
   } },
+  ...(EXTENDED_PROXY ? [{ id: "extended", venue: "Extended", every: REFRESH_MS, async fetch() {
+      const d = await getJSON(EXTENDED_PROXY);
+      return d.data.filter(m => m.type === "PERPETUAL" && m.status === "ACTIVE" && m.marketStats).map(m => {
+        const st = m.marketStats;
+        return row("Extended", m.assetName || m.name.replace("-USD", ""), num(st.markPrice), num(st.fundingRate), num(st.openInterest), num(st.dailyVolume));
+      });
+  } }] : []),
   { id: "variational", venue: "Variational", every: 20000, async fetch() {
       const d = await getJSON("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats");
       // funding_rate here is already annualised (e.g. 0.1095 = 10.95% APR).
