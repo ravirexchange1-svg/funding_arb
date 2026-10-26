@@ -216,8 +216,10 @@ function qfexConnect() {
   qfex.opening = new Promise((resolve, reject) => {
     const ws = new WebSocket("wss://mds.qfex.com/");
     qfex.ws = ws;
-    ws.onopen = () => { ws.send(JSON.stringify({ type: "subscribe", channels: ["funding", "mark_price", "open_interest"], symbols: ["*"] })); resolve(); };
-    ws.onerror = () => reject(new Error("websocket error"));
+    const fail = msg => { qfex.opening = null; try { ws.close(); } catch {} reject(new Error(msg)); };
+    const timer = setTimeout(() => fail("websocket did not open in 8s"), 8000);
+    ws.onopen = () => { clearTimeout(timer); ws.send(JSON.stringify({ type: "subscribe", channels: ["funding", "mark_price", "open_interest"], symbols: ["*"] })); resolve(); };
+    ws.onerror = () => { clearTimeout(timer); fail("websocket error"); };
     ws.onclose = () => { qfex.ws = null; qfex.opening = null; };
     ws.onmessage = e => {
       let d; try { d = JSON.parse(e.data); } catch { return; }
@@ -318,10 +320,12 @@ const state = { rows: [], view: "markets", venue: "", q: "", sort: "apr", dir: -
 const $ = id => document.getElementById(id);
 const tabs = [...document.querySelectorAll("#tabs button")];
 
+// A venue that never answers (blocked, slow or down) must not hold up the others: give each one a deadline.
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`no answer after ${ms / 1000}s`)), ms))]);
 async function run(a) {
   const st = state.status.get(a.id);
   try {
-    const rows = await a.fetch();
+    const rows = await withTimeout(a.fetch(), 20000);
     state.cache.set(a.id, rows);
     Object.assign(st, { ok: true, n: rows.length, err: "", at: Date.now() });
   } catch (e) {
@@ -329,14 +333,17 @@ async function run(a) {
   }
 }
 
+function refreshRows() {
+  state.rows = [].concat(...ADAPTERS.map(a => state.cache.get(a.id) || []));
+  const sts = ADAPTERS.map(a => state.status.get(a.id));
+  const bad = sts.filter(x => x.ok === false).length, waiting = sts.filter(x => x.ok === null).length;
+  $("dot").className = "dot " + (bad ? "err" : "live");
+  $("status").textContent = (waiting ? `Loading… ${ADAPTERS.length - waiting - bad}/${ADAPTERS.length} venues` : bad ? `${ADAPTERS.length - bad}/${ADAPTERS.length} venues ok` : "Live") + " · " + new Date().toLocaleTimeString();
+  render();
+}
 async function tick() {
   const due = ADAPTERS.filter(a => Date.now() - (state.status.get(a.id).at || 0) >= a.every - 500);
-  await Promise.all(due.map(run));
-  state.rows = [].concat(...ADAPTERS.map(a => state.cache.get(a.id) || []));
-  const bad = ADAPTERS.filter(a => state.status.get(a.id).ok === false).length;
-  $("dot").className = "dot " + (bad ? "err" : "live");
-  $("status").textContent = (bad ? `${ADAPTERS.length - bad}/${ADAPTERS.length} venues ok` : "Live") + " · " + new Date().toLocaleTimeString();
-  render();
+  await Promise.all(due.map(a => run(a).then(refreshRows)));   // each venue appears as soon as it answers
   recordSnapshot();
 }
 
