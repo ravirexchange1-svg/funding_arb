@@ -139,6 +139,20 @@
       <tbody id="body"></tbody>
     </table>
   </div>
+  <details class="note">
+    <summary>Funding units by venue (every figure on this page is converted to a per-hour rate)</summary>
+    <table style="width:auto;margin-top:6px"><thead><tr><th style="cursor:default">Venue</th><th style="cursor:default;text-align:left">Source field</th><th style="cursor:default;text-align:left">Converted to per hour by</th></tr></thead><tbody>
+      <tr><td>Hyperliquid (core and all dexes)</td><td style="text-align:left">funding: hourly</td><td style="text-align:left">used as is</td></tr>
+      <tr><td>Aster</td><td style="text-align:left">last settled rate per interval (1, 2, 4 or 8h)</td><td style="text-align:left">÷ that market’s interval</td></tr>
+      <tr><td>Lighter, RH Lighter</td><td style="text-align:left">live: 8-hour rate; history: hourly, in percent</td><td style="text-align:left">live ÷ 8; history ÷ 100</td></tr>
+      <tr><td>Paradex</td><td style="text-align:left">8-hour rate</td><td style="text-align:left">÷ 8</td></tr>
+      <tr><td>Pacifica</td><td style="text-align:left">next funding: hourly</td><td style="text-align:left">used as is</td></tr>
+      <tr><td>dYdX</td><td style="text-align:left">next funding: hourly</td><td style="text-align:left">used as is</td></tr>
+      <tr><td>Extended</td><td style="text-align:left">hourly</td><td style="text-align:left">used as is</td></tr>
+      <tr><td>Variational</td><td style="text-align:left">annualised</td><td style="text-align:left">÷ 8,760</td></tr>
+      <tr><td>QFEX</td><td style="text-align:left">annualised (unit not verified)</td><td style="text-align:left">÷ 8,760</td></tr>
+    </tbody></table>
+  </details>
   <p class="note">
     Funding is shown as an hourly rate; APR = hourly × 24 × 365, simple (positive: longs pay shorts). Venues quote funding over different
     intervals (1h, 4h, 8h), so each rate is divided by its interval. Aster shows the last settled rate, not a forecast.
@@ -188,7 +202,8 @@ function hlAdapter(dex) {
 function lighterAdapter(venue, host) {
   return { id: venue, venue, every: REFRESH_MS, async fetch() {
     const [fr, ob] = await Promise.all([getJSON(host + "/api/v1/funding-rates"), getJSON(host + "/api/v1/orderBookDetails")]);
-    const rates = new Map(fr.funding_rates.filter(x => x.exchange === "lighter").map(x => [x.market_id, x.rate]));
+    // The live feed quotes the 8-hour rate (history is hourly), so divide by 8 to match every other venue.
+    const rates = new Map(fr.funding_rates.filter(x => x.exchange === "lighter").map(x => [x.market_id, x.rate / 8]));
     return ob.order_book_details.filter(m => m.market_type === "perp" && m.status === "active" && rates.has(m.market_id))
       .map(m => row(venue, m.symbol, num(m.mark_price), num(rates.get(m.market_id)), num(m.open_interest_usd), num(m.daily_quote_token_volume), m.market_id));
   } };
